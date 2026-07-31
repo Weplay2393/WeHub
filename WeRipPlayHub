@@ -267,11 +267,15 @@ end
 
 -- ============================
 -- GUI: Улучшенное стильное меню (красно-чёрное) с логотипом/сворачиванием и авто-лутом
+-- Добавлено: плавающий островок (Floating Button), который можно перетаскивать и которым можно сворачивать/разворачивать меню
+-- Исправлено: Drag поддерживает Touch (мобильные устройства)
 -- ============================
 local function createMenu()
     -- Удаляем старое меню, если есть
     local existingGui = PlayerGui:FindFirstChild("WeHubESPMenu")
     if existingGui then existingGui:Destroy() end
+    local existingFloat = PlayerGui:FindFirstChild("WeHubFloat")
+    if existingFloat then existingFloat:Destroy() end
 
     local screenGui = Instance.new("ScreenGui")
     screenGui.Name = "WeHubESPMenu"
@@ -412,7 +416,7 @@ local function createMenu()
     note.Size = UDim2.new(1, -16, 0, 22)
     note.Position = UDim2.new(0, 8, 1, -28)
     note.BackgroundTransparency = 1
-    note.Text = "WeHub — улучшенный интерфейс. Anti-ban/anti-kick не будут реализованы по этическим и политикам безопасности."
+    note.Text = "WeHub — улучшенный интерфейс. Anti-ban/anti-kick не будут реализованы по этическим и политическим причинам."
     note.TextColor3 = Color3.fromRGB(180,180,180)
     note.Font = Enum.Font.Gotham
     note.TextSize = 10
@@ -435,6 +439,8 @@ local function createMenu()
 
     btnClose.MouseButton1Click:Connect(function()
         screenGui:Destroy()
+        local f = PlayerGui:FindFirstChild("WeHubFloat")
+        if f then f:Destroy() end
         clearAllHighlights()
     end)
 
@@ -452,8 +458,8 @@ local function createMenu()
         end
     end)
 
-    -- Logo click: свернуть/развернуть (быстрая сворачивающая кнопка)
-    logo.MouseButton1Click:Connect(function()
+    -- Logo click: свернуть/развернуть (быстрая свёртка)
+    logo.Activated:Connect(function()
         btnMin:MouseButton1Click()
     end)
 
@@ -503,13 +509,13 @@ local function createMenu()
         end
     end)
 
-    -- Перетаскивание окна (drag) — улучшенная логика
+    -- Перетаскивание окна (drag) — улучшенная логика, поддержка Touch
     local dragging = false
     local dragStart
     local startPos
 
-    titleBar.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+    local function onInputBegan(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             dragging = true
             dragStart = input.Position
             startPos = mainFrame.Position
@@ -519,18 +525,22 @@ local function createMenu()
                 end
             end)
         end
-    end)
+    end
 
-    titleBar.InputChanged:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseMovement then
-            if dragging and dragStart and startPos then
-                local delta = input.Position - dragStart
-                local newX = startPos.X.Offset + delta.X
-                local newY = startPos.Y.Offset + delta.Y
-                mainFrame.Position = UDim2.new(startPos.X.Scale, newX, startPos.Y.Scale, newY)
-            end
+    local function onInputChanged(input)
+        if (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) and dragging and dragStart and startPos then
+            local delta = input.Position - dragStart
+            local newX = startPos.X.Offset + delta.X
+            local newY = startPos.Y.Offset + delta.Y
+            mainFrame.Position = UDim2.new(startPos.X.Scale, newX, startPos.Y.Scale, newY)
         end
-    end)
+    end
+
+    -- Подключаем к titleBar и самому mainFrame (чтобы можно было перетаскивать и с телефона)
+    titleBar.InputBegan:Connect(onInputBegan)
+    titleBar.InputChanged:Connect(onInputChanged)
+    mainFrame.InputBegan:Connect(onInputBegan)
+    mainFrame.InputChanged:Connect(onInputChanged)
 
     -- Изменение размера (resize)
     local resizing = false
@@ -558,6 +568,73 @@ local function createMenu()
                 local newH = math.clamp(startSize.Y.Offset + delta.Y, 36, 900)
                 mainFrame.Size = UDim2.new(0, newW, 0, newH)
             end
+        end
+    end)
+
+    -- Создаём плавающий островок (отдельный ScreenGui), который всегда виден и может сворачивать/разворачивать меню
+    local floatGui = Instance.new("ScreenGui")
+    floatGui.Name = "WeHubFloat"
+    floatGui.ResetOnSpawn = false
+    floatGui.Parent = PlayerGui
+
+    local floatBtn = Instance.new("ImageButton")
+    floatBtn.Name = "FloatingButton"
+    floatBtn.Size = UDim2.new(0, 48, 0, 48)
+    floatBtn.Position = UDim2.new(0.02, 0, 0.8, 0)
+    floatBtn.AnchorPoint = Vector2.new(0, 0)
+    floatBtn.BackgroundColor3 = Color3.fromRGB(28, 28, 28)
+    floatBtn.BackgroundTransparency = 0
+    floatBtn.Image = "rbxassetid://6023426915"
+    floatBtn.Parent = floatGui
+    local floatCorner = Instance.new("UICorner")
+    floatCorner.CornerRadius = UDim.new(0,12)
+    floatCorner.Parent = floatBtn
+    local floatStroke = Instance.new("UIStroke")
+    floatStroke.Color = Color3.fromRGB(60, 0, 0)
+    floatStroke.Thickness = 1
+    floatStroke.Parent = floatBtn
+
+    -- Dragging the floating button (supports touch and mouse)
+    local draggingFloat = false
+    local floatDragStart
+    local floatStartPos
+
+    floatBtn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            draggingFloat = true
+            floatDragStart = input.Position
+            floatStartPos = floatBtn.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    draggingFloat = false
+                end
+            end)
+        end
+    end)
+
+    floatBtn.InputChanged:Connect(function(input)
+        if (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) and draggingFloat and floatDragStart and floatStartPos then
+            local delta = input.Position - floatDragStart
+            local newX = floatStartPos.X.Offset + delta.X
+            local newY = floatStartPos.Y.Offset + delta.Y
+            floatBtn.Position = UDim2.new(floatStartPos.X.Scale, newX, floatStartPos.Y.Scale, newY)
+        end
+    end)
+
+    -- Activated toggles menu visibility (works for touch & mouse)
+    floatBtn.Activated:Connect(function()
+        local gui = PlayerGui:FindFirstChild("WeHubESPMenu")
+        if gui and gui:IsA("ScreenGui") then
+            local mf = gui:FindFirstChild("Main")
+            if mf then
+                mf.Visible = not mf.Visible
+                if not mf.Visible then
+                    clearAllHighlights()
+                end
+            end
+        else
+            -- если меню удалено, создаём заново
+            createMenu()
         end
     end)
 
