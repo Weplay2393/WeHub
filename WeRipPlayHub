@@ -1,1 +1,82 @@
-kaka
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local LocalPlayer = Players.LocalPlayer
+
+-- Функция создания подсветки (Highlight)
+local function createHighlight(object, fillColor, outlineColor)
+    -- Если подсветка уже есть, не создаем дубликат
+    if object:FindFirstChild("ESPHighlight") then 
+        object.ESPHighlight.FillColor = fillColor
+        return 
+    end
+    
+    local highlight = Instance.new("Highlight")
+    highlight.Name = "ESPHighlight"
+    highlight.FillColor = fillColor
+    highlight.OutlineColor = outlineColor
+    highlight.FillTransparency = 0.4 -- Прозрачность заливки (0 - видно четко, 1 - не видно)
+    highlight.OutlineTransparency = 0 -- Обводка всегда видна
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop -- Видно сквозь стены
+    highlight.Parent = object
+end
+
+-- Функция проверки: в одной ли команде игроки
+local function isTeammate(targetPlayer)
+    if not targetPlayer or targetPlayer == LocalPlayer then return false end
+    
+    -- 1. Проверка по стандартным командам Roblox
+    if targetPlayer.Team and LocalPlayer.Team then
+        return targetPlayer.Team == LocalPlayer.Team
+    end
+    
+    -- 2. Проверка по кастомным ролям "Villain" / "Survivor"
+    local myRole = LocalPlayer:FindFirstChild("Role") or LocalPlayer:FindFirstChild("Status")
+    local targetRole = targetPlayer:FindFirstChild("Role") or targetPlayer:FindFirstChild("Status")
+    if myRole and targetRole and myRole.Value == targetRole.Value then
+        return true
+    end
+    
+    -- 3. Проверка по атрибутам (современный метод Roblox)
+    if LocalPlayer:GetAttribute("Role") and targetPlayer:GetAttribute("Role") then
+        return LocalPlayer:GetAttribute("Role") == targetPlayer:GetAttribute("Role")
+    end
+    
+    -- По умолчанию считаем врагом (Злодеем), если другие проверки не сработали
+    return false
+end
+
+-- 1. Обновление ESP Игроков
+local function updatePlayersESP()
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+            -- Зеленый для тиммейтов, Красный для врагов/Злодея
+            local color = isTeammate(player) and Color3.fromRGB(0, 255, 0) or Color3.fromRGB(255, 0, 0)
+            createHighlight(player.Character, color, Color3.fromRGB(255, 255, 255))
+        end
+    end
+end
+
+-- 2. Обновление ESP Сундуков и Коробок
+local function updateChestsESP()
+    for _, obj in pairs(Workspace:GetDescendants()) do
+        -- Ищем модели или отдельные части сундуков
+        if obj:IsA("Model") or obj:IsA("BasePart") then
+            local name = obj.Name:lower()
+            -- Проверяем английские и русские варианты названий объектов в коде игры
+            if name:match("chest") or name:match("box") or name:match("crate") or name:match("loot") or name:match("box") then
+                -- Сундуки подсвечиваются Ярко-Желтым цветом
+                createHighlight(obj, Color3.fromRGB(255, 215, 0), Color3.fromRGB(255, 255, 255))
+            end
+        end
+    end
+end
+
+-- Бесконечный фоновый цикл для постоянного обновления карты
+task.spawn(function()
+    while true do
+        pcall(updatePlayersESP)
+        pcall(updateChestsESP)
+        task.wait(2) -- Обновление каждые 2 секунды (не лагает и видит новые предметы)
+    end
+end)
+
