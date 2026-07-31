@@ -3,7 +3,7 @@ local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local CollectionService = game:GetService("CollectionService")
 local LocalPlayer = Players.LocalPlayer
-local PlayerGui = LocalPlayer and LocalPlayer:WaitForChild("PlayerGui") or nil
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
 -- Настройки по умолчанию
 local espPlayersEnabled = true
@@ -13,10 +13,6 @@ local espBoxesEnabled = true
 local TEAM_COLOR = Color3.fromRGB(0, 255, 0)    -- зеленый для тиммейтов
 local ENEMY_COLOR = Color3.fromRGB(255, 0, 0)   -- красный для врагов
 local CHEST_COLOR = Color3.fromRGB(0, 162, 255) -- синий для интерактивных сундуков
-
--- Параметры оптимизации
-local CHEST_SCAN_INTERVAL = 4 -- секунды между полными сканами мира для сундуков
-local CHEST_MAX_DISTANCE = 220 -- максимальная дистанция для подсветки сундуков (studs)
 
 -- Вспомогательная функция: создание/обновление Highlight
 local function createHighlight(object, fillColor, outlineColor)
@@ -61,22 +57,20 @@ local function isTeammate(targetPlayer)
     if not targetPlayer or targetPlayer == LocalPlayer then return false end
 
     -- 1) Стандартные Teams
-    if targetPlayer.Team and LocalPlayer and LocalPlayer.Team then
+    if targetPlayer.Team and LocalPlayer.Team then
         if targetPlayer.Team == LocalPlayer.Team then return true end
     end
 
     -- 2) Кастомные роли (Role / Status)
-    local myRole = LocalPlayer and (LocalPlayer:FindFirstChild("Role") or LocalPlayer:FindFirstChild("Status"))
+    local myRole = LocalPlayer:FindFirstChild("Role") or LocalPlayer:FindFirstChild("Status")
     local targetRole = targetPlayer:FindFirstChild("Role") or targetPlayer:FindFirstChild("Status")
     if myRole and targetRole and myRole.Value == targetRole.Value then
         return true
     end
 
     -- 3) Атрибуты
-    if LocalPlayer and LocalPlayer.GetAttribute and targetPlayer.GetAttribute then
-        if LocalPlayer:GetAttribute("Role") and targetPlayer:GetAttribute("Role") then
-            return LocalPlayer:GetAttribute("Role") == targetPlayer:GetAttribute("Role")
-        end
+    if LocalPlayer:GetAttribute("Role") and targetPlayer:GetAttribute("Role") then
+        return LocalPlayer:GetAttribute("Role") == targetPlayer:GetAttribute("Role")
     end
 
     return false
@@ -98,7 +92,7 @@ local function isInteractable(obj)
     if obj:FindFirstChildOfClass("ClickDetector") then return true end
 
     -- 3) Атрибут CanInteract == true
-    if obj.GetAttribute and obj:GetAttribute("CanInteract") == true then return true end
+    if obj:GetAttribute("CanInteract") == true then return true end
 
     -- 4) Наличие child с именем "Interaction" или "Interact"
     if obj:FindFirstChild("Interaction") or obj:FindFirstChild("Interact") then return true end
@@ -107,22 +101,6 @@ local function isInteractable(obj)
     if CollectionService:HasTag(obj, "Interactable") then return true end
 
     return false
-end
-
--- Вспомогательная: проверка дистанции до игрока (для оптимизации сканов сундуков)
-local function isObjectClose(obj)
-    if not LocalPlayer or not LocalPlayer.Character then return false end
-    local hrp = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-    if not hrp then return false end
-    local pos
-    if obj:IsA("BasePart") then
-        pos = obj.Position
-    elseif obj:IsA("Model") then
-        local primary = obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
-        if primary then pos = primary.Position end
-    end
-    if not pos then return false end
-    return (pos - hrp.Position).Magnitude <= CHEST_MAX_DISTANCE
 end
 
 -- Обновление ESP игроков
@@ -146,7 +124,7 @@ local function updatePlayersESP()
     end
 end
 
--- Обновление ESP сундуков/коробок (только интерактивных) с оптимизацией
+-- Обновление ESP сундуков/коробок (только интерактивных)
 local function updateChestsESP()
     if not espBoxesEnabled then
         -- удалить все подсветки сундуков
@@ -159,60 +137,42 @@ local function updateChestsESP()
         return
     end
 
-    -- Сканируем сначала объекты с тэгом Interactable (быстро)
-    local tagged = CollectionService:GetTagged("Interactable")
-    for _, obj in ipairs(tagged) do
-        if obj and (obj:IsA("Model") or obj:IsA("BasePart")) then
-            if isInteractable(obj) and isObjectClose(obj) then
-                createHighlight(obj, CHEST_COLOR, Color3.fromRGB(255,255,255))
-            else
-                local h = obj:FindFirstChild("ESPHighlight")
-                if h and h:IsA("Highlight") then h:Destroy() end
-            end
-        end
-    end
-
-    -- Затем ограниченный обход мира: только объекты с подходящими именами и в пределах дистанции
-    for _, obj in ipairs(Workspace:GetDescendants()) do
-        if (obj:IsA("Model") or obj:IsA("BasePart")) then
+    for _, obj in pairs(Workspace:GetDescendants()) do
+        if obj:IsA("Model") or obj:IsA("BasePart") then
             local name = tostring(obj.Name):lower()
+            -- базовая проверка по имени, чтобы сужать поиск сундуков/коробок
             if name:match("chest") or name:match("box") or name:match("crate") or name:match("loot") or name:match("container") then
-                if isInteractable(obj) and isObjectClose(obj) then
+                if isInteractable(obj) then
                     createHighlight(obj, CHEST_COLOR, Color3.fromRGB(255,255,255))
                 else
+                    -- если не интерактивный, убедимся, что подсветки нет
                     local h = obj:FindFirstChild("ESPHighlight")
                     if h and h:IsA("Highlight") then h:Destroy() end
+                end
+            else
+                -- дополнительно: если объект помечен тэгом Interactable, тоже подсвечиваем
+                if CollectionService:HasTag(obj, "Interactable") and isInteractable(obj) then
+                    createHighlight(obj, CHEST_COLOR, Color3.fromRGB(255,255,255))
                 end
             end
         end
     end
 end
 
--- Раздельные фоновые циклы: игроки — чаще, сундуки — реже, чтобы уменьшить лаги при включении
+-- Фоновый цикл обновления ESP
 task.spawn(function()
     while true do
         pcall(updatePlayersESP)
-        task.wait(1.5)
-    end
-end)
-
-task.spawn(function()
-    while true do
         pcall(updateChestsESP)
-        task.wait(CHEST_SCAN_INTERVAL)
+        task.wait(2)
     end
 end)
 
 -- ============================
--- GUI: Красно-чёрное меню (восстановлено исходное поведение)
+-- GUI: Красно-чёрное меню
 -- ============================
 local function createMenu()
     -- Удаляем старое меню, если есть
-    if not PlayerGui then
-        PlayerGui = Players.LocalPlayer and Players.LocalPlayer:FindFirstChild("PlayerGui")
-        if not PlayerGui then return end
-    end
-
     local existingGui = PlayerGui:FindFirstChild("WeHubESPMenu")
     if existingGui then existingGui:Destroy() end
 
@@ -496,7 +456,7 @@ local visible = true
 UIS.InputBegan:Connect(function(input, gp)
     if gp then return end
     if input.KeyCode == Enum.KeyCode.M then
-        local gui = PlayerGui and PlayerGui:FindFirstChild("WeHubESPMenu")
+        local gui = PlayerGui:FindFirstChild("WeHubESPMenu")
         if gui then
             visible = not visible
             gui.Enabled = visible
