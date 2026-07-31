@@ -4,6 +4,8 @@ local Workspace = game:GetService("Workspace")
 local CollectionService = game:GetService("CollectionService")
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local UIS = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
 
 -- Настройки по умолчанию
 local espPlayersEnabled = true
@@ -28,7 +30,7 @@ local function createHighlight(object, fillColor, outlineColor)
     highlight.Name = "ESPHighlight"
     highlight.FillColor = fillColor
     highlight.OutlineColor = outlineColor or Color3.fromRGB(255,255,255)
-    highlight.FillTransparency = 0.4
+    highlight.FillTransparency = 0.35
     highlight.OutlineTransparency = 0
     highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
     highlight.Parent = object
@@ -56,19 +58,16 @@ end
 local function isTeammate(targetPlayer)
     if not targetPlayer or targetPlayer == LocalPlayer then return false end
 
-    -- 1) Стандартные Teams
     if targetPlayer.Team and LocalPlayer.Team then
         if targetPlayer.Team == LocalPlayer.Team then return true end
     end
 
-    -- 2) Кастомные роли (Role / Status)
     local myRole = LocalPlayer:FindFirstChild("Role") or LocalPlayer:FindFirstChild("Status")
     local targetRole = targetPlayer:FindFirstChild("Role") or targetPlayer:FindFirstChild("Status")
     if myRole and targetRole and myRole.Value == targetRole.Value then
         return true
     end
 
-    -- 3) Атрибуты
     if LocalPlayer:GetAttribute("Role") and targetPlayer:GetAttribute("Role") then
         return LocalPlayer:GetAttribute("Role") == targetPlayer:GetAttribute("Role")
     end
@@ -80,24 +79,15 @@ end
 local function isInteractable(obj)
     if not obj then return false end
 
-    -- 1) Если у объекта или у какой-то его части есть ProximityPrompt
     if obj:FindFirstChildOfClass("ProximityPrompt") then return true end
-    -- Также проверяем потомков (части модели)
     for _, descendant in pairs(obj:GetDescendants()) do
         if descendant:IsA("ProximityPrompt") then return true end
         if descendant:IsA("ClickDetector") then return true end
     end
 
-    -- 2) Наличие ClickDetector
     if obj:FindFirstChildOfClass("ClickDetector") then return true end
-
-    -- 3) Атрибут CanInteract == true
     if obj:GetAttribute("CanInteract") == true then return true end
-
-    -- 4) Наличие child с именем "Interaction" или "Interact"
     if obj:FindFirstChild("Interaction") or obj:FindFirstChild("Interact") then return true end
-
-    -- 5) Тэг через CollectionService: "Interactable" (если разработчик пометил)
     if CollectionService:HasTag(obj, "Interactable") then return true end
 
     return false
@@ -106,7 +96,6 @@ end
 -- Обновление ESP игроков
 local function updatePlayersESP()
     if not espPlayersEnabled then
-        -- при выключенном ESP игроков — удаляем их подсветки
         for _, plr in pairs(Players:GetPlayers()) do
             if plr.Character then
                 local h = plr.Character:FindFirstChild("ESPHighlight")
@@ -127,7 +116,6 @@ end
 -- Обновление ESP сундуков/коробок (только интерактивных)
 local function updateChestsESP()
     if not espBoxesEnabled then
-        -- удалить все подсветки сундуков
         for _, obj in pairs(Workspace:GetDescendants()) do
             if (obj:IsA("Model") or obj:IsA("BasePart")) and obj:FindFirstChild("ESPHighlight") then
                 local h = obj:FindFirstChild("ESPHighlight")
@@ -140,17 +128,14 @@ local function updateChestsESP()
     for _, obj in pairs(Workspace:GetDescendants()) do
         if obj:IsA("Model") or obj:IsA("BasePart") then
             local name = tostring(obj.Name):lower()
-            -- базовая проверка по имени, чтобы сужать поиск сундуков/коробок
             if name:match("chest") or name:match("box") or name:match("crate") or name:match("loot") or name:match("container") then
                 if isInteractable(obj) then
                     createHighlight(obj, CHEST_COLOR, Color3.fromRGB(255,255,255))
                 else
-                    -- если не интерактивный, убедимся, что подсветки нет
                     local h = obj:FindFirstChild("ESPHighlight")
                     if h and h:IsA("Highlight") then h:Destroy() end
                 end
             else
-                -- дополнительно: если объект помечен тэгом Interactable, тоже подсвечиваем
                 if CollectionService:HasTag(obj, "Interactable") and isInteractable(obj) then
                     createHighlight(obj, CHEST_COLOR, Color3.fromRGB(255,255,255))
                 end
@@ -169,10 +154,10 @@ task.spawn(function()
 end)
 
 -- ============================
--- GUI: Красно-чёрное меню
+-- GUI: Улучшенный интерфейс с ползунками и перемещаемым логотипом
+-- Поддержка перетаскивания на мобильных устройствах
 -- ============================
 local function createMenu()
-    -- Удаляем старое меню, если есть
     local existingGui = PlayerGui:FindFirstChild("WeHubESPMenu")
     if existingGui then existingGui:Destroy() end
 
@@ -181,277 +166,255 @@ local function createMenu()
     screenGui.ResetOnSpawn = false
     screenGui.Parent = PlayerGui
 
+    -- Main window
     local mainFrame = Instance.new("Frame")
     mainFrame.Name = "Main"
-    mainFrame.Size = UDim2.new(0, 380, 0, 220)
-    mainFrame.Position = UDim2.new(0.6, 0, 0.15, 0)
-    mainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    mainFrame.Size = UDim2.new(0, 420, 0, 260)
+    mainFrame.Position = UDim2.new(0.55, 0, 0.15, 0)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(18,18,18)
     mainFrame.BorderSizePixel = 0
+    mainFrame.Active = true
     mainFrame.Parent = screenGui
 
-    local uic = Instance.new("UICorner", mainFrame)
-    uic.CornerRadius = UDim.new(0, 8)
+    local mainCorner = Instance.new("UICorner")
+    mainCorner.CornerRadius = UDim.new(0, 16)
+    mainCorner.Parent = mainFrame
 
-    -- Titlebar
+    -- Slight border
+    local stroke = Instance.new("UIStroke")
+    stroke.Thickness = 1
+    stroke.Color = Color3.fromRGB(60,0,0)
+    stroke.Parent = mainFrame
+
+    -- Titlebar (drag area)
     local titleBar = Instance.new("Frame")
     titleBar.Name = "TitleBar"
-    titleBar.Size = UDim2.new(1, 0, 0, 30)
+    titleBar.Size = UDim2.new(1, 0, 0, 48)
     titleBar.Position = UDim2.new(0, 0, 0, 0)
-    titleBar.BackgroundColor3 = Color3.fromRGB(30, 0, 0)
-    titleBar.BorderSizePixel = 0
+    titleBar.BackgroundTransparency = 1
     titleBar.Parent = mainFrame
 
+    -- Logo island (перемещаемая красная W на чёрном фоне)
+    local logoIsland = Instance.new("Frame")
+    logoIsland.Name = "LogoIsland"
+    logoIsland.Size = UDim2.new(0, 44, 0, 44)
+    logoIsland.Position = UDim2.new(0, 8, 0, 6)
+    logoIsland.BackgroundColor3 = Color3.fromRGB(0,0,0)
+    logoIsland.BorderSizePixel = 0
+    logoIsland.Parent = mainFrame
+    local logoCorner = Instance.new("UICorner", logoIsland)
+    logoCorner.CornerRadius = UDim.new(0, 10)
+
+    local logoLabel = Instance.new("TextLabel")
+    logoLabel.Name = "W"
+    logoLabel.Size = UDim2.new(1,0,1,0)
+    logoLabel.BackgroundTransparency = 1
+    logoLabel.Text = "W"
+    logoLabel.TextColor3 = Color3.fromRGB(220,20,20)
+    logoLabel.Font = Enum.Font.GothamBlack
+    logoLabel.TextSize = 26
+    logoLabel.Parent = logoIsland
+
+    -- Title text
     local title = Instance.new("TextLabel")
     title.Name = "Title"
-    title.Size = UDim2.new(1, -90, 1, 0)
-    title.Position = UDim2.new(0, 8, 0, 0)
+    title.Size = UDim2.new(1, -80, 0, 40)
+    title.Position = UDim2.new(0, 64, 0, 4)
     title.BackgroundTransparency = 1
-    title.Text = "WeHub ESP"
-    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.Text = "WeHub — ESP"
+    title.TextColor3 = Color3.fromRGB(255,220,220)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 18
     title.TextXAlignment = Enum.TextXAlignment.Left
-    title.Font = Enum.Font.SourceSansBold
-    title.TextSize = 16
     title.Parent = titleBar
 
-    -- Close / Minimize / Maximize buttons
-    local btnClose = Instance.new("TextButton")
-    btnClose.Name = "Close"
-    btnClose.Size = UDim2.new(0, 26, 0, 20)
-    btnClose.Position = UDim2.new(1, -32, 0, 5)
-    btnClose.BackgroundColor3 = Color3.fromRGB(170, 0, 0)
-    btnClose.Text = "X"
-    btnClose.Font = Enum.Font.SourceSansBold
-    btnClose.TextSize = 14
-    btnClose.TextColor3 = Color3.fromRGB(255,255,255)
-    btnClose.Parent = titleBar
-    Instance.new("UICorner", btnClose).CornerRadius = UDim.new(0,4)
-
-    local btnMin = Instance.new("TextButton")
+    -- Minimize button
+    local btnMin = Instance.new("ImageButton")
     btnMin.Name = "Min"
-    btnMin.Size = UDim2.new(0, 26, 0, 20)
-    btnMin.Position = UDim2.new(1, -64, 0, 5)
-    btnMin.BackgroundColor3 = Color3.fromRGB(100, 0, 0)
-    btnMin.Text = "_"
-    btnMin.Font = Enum.Font.SourceSansBold
-    btnMin.TextSize = 14
-    btnMin.TextColor3 = Color3.fromRGB(255,255,255)
+    btnMin.Size = UDim2.new(0, 32, 0, 32)
+    btnMin.Position = UDim2.new(1, -44, 0, 8)
+    btnMin.BackgroundTransparency = 1
+    btnMin.Image = "rbxassetid://6023426915" -- simple icon
     btnMin.Parent = titleBar
-    Instance.new("UICorner", btnMin).CornerRadius = UDim.new(0,4)
-
-    local btnMax = Instance.new("TextButton")
-    btnMax.Name = "Max"
-    btnMax.Size = UDim2.new(0, 26, 0, 20)
-    btnMax.Position = UDim2.new(1, -96, 0, 5)
-    btnMax.BackgroundColor3 = Color3.fromRGB(120, 0, 0)
-    btnMax.Text = "▢"
-    btnMax.Font = Enum.Font.SourceSansBold
-    btnMax.TextSize = 12
-    btnMax.TextColor3 = Color3.fromRGB(255,255,255)
-    btnMax.Parent = titleBar
-    Instance.new("UICorner", btnMax).CornerRadius = UDim.new(0,4)
 
     -- Content area
     local content = Instance.new("Frame")
     content.Name = "Content"
-    content.Size = UDim2.new(1, -16, 1, -46)
-    content.Position = UDim2.new(0, 8, 0, 38)
+    content.Size = UDim2.new(1, -24, 1, -86)
+    content.Position = UDim2.new(0, 12, 0, 60)
     content.BackgroundTransparency = 1
     content.Parent = mainFrame
 
-    -- Player ESP Toggle
-    local playerToggleLabel = Instance.new("TextLabel")
-    playerToggleLabel.Size = UDim2.new(0, 220, 0, 30)
-    playerToggleLabel.Position = UDim2.new(0, 8, 0, 4)
-    playerToggleLabel.Text = "ESP Players (Green = Team, Red = Enemy)"
-    playerToggleLabel.TextColor3 = Color3.fromRGB(255,255,255)
-    playerToggleLabel.BackgroundTransparency = 1
-    playerToggleLabel.Font = Enum.Font.SourceSans
-    playerToggleLabel.TextSize = 14
-    playerToggleLabel.Parent = content
+    -- Helper: create slider (switch) UI
+    local function makeSliderRow(parent, yOffset, labelText, initial)
+        local label = Instance.new("TextLabel")
+        label.Size = UDim2.new(0.68, 0, 0, 32)
+        label.Position = UDim2.new(0, 8, 0, yOffset)
+        label.Text = labelText
+        label.TextColor3 = Color3.fromRGB(230,230,230)
+        label.BackgroundTransparency = 1
+        label.Font = Enum.Font.Gotham
+        label.TextSize = 14
+        label.TextXAlignment = Enum.TextXAlignment.Left
+        label.Parent = parent
 
-    local playerToggle = Instance.new("TextButton")
-    playerToggle.Size = UDim2.new(0, 80, 0, 26)
-    playerToggle.Position = UDim2.new(1, -92, 0, 4)
-    playerToggle.Text = espPlayersEnabled and "ON" or "OFF"
-    playerToggle.BackgroundColor3 = espPlayersEnabled and Color3.fromRGB(200,30,30) or Color3.fromRGB(80,80,80)
-    playerToggle.TextColor3 = Color3.fromRGB(255,255,255)
-    playerToggle.Font = Enum.Font.SourceSansBold
-    playerToggle.TextSize = 14
-    playerToggle.Parent = content
-    Instance.new("UICorner", playerToggle).CornerRadius = UDim.new(0,6)
+        local switchBack = Instance.new("Frame")
+        switchBack.Size = UDim2.new(0, 56, 0, 30)
+        switchBack.Position = UDim2.new(1, -76, 0, yOffset)
+        switchBack.BackgroundColor3 = Color3.fromRGB(60,60,60)
+        switchBack.Parent = parent
+        local swCorner = Instance.new("UICorner", switchBack)
+        swCorner.CornerRadius = UDim.new(0, 16)
 
-    -- Boxes ESP Toggle
-    local boxToggleLabel = Instance.new("TextLabel")
-    boxToggleLabel.Size = UDim2.new(0, 220, 0, 30)
-    boxToggleLabel.Position = UDim2.new(0, 8, 0, 44)
-    boxToggleLabel.Text = "ESP Boxes (Только интерактивные) — Синий"
-    boxToggleLabel.TextColor3 = Color3.fromRGB(255,255,255)
-    boxToggleLabel.BackgroundTransparency = 1
-    boxToggleLabel.Font = Enum.Font.SourceSans
-    boxToggleLabel.TextSize = 14
-    boxToggleLabel.Parent = content
+        local knob = Instance.new("Frame")
+        knob.Name = "Knob"
+        knob.Size = UDim2.new(0, 26, 0, 26)
+        knob.Position = UDim2.new(0, 2, 0, 2)
+        knob.BackgroundColor3 = initial and Color3.fromRGB(200,30,30) or Color3.fromRGB(140,140,140)
+        knob.Parent = switchBack
+        local kCorner = Instance.new("UICorner", knob)
+        kCorner.CornerRadius = UDim.new(0, 14)
 
-    local boxToggle = Instance.new("TextButton")
-    boxToggle.Size = UDim2.new(0, 80, 0, 26)
-    boxToggle.Position = UDim2.new(1, -92, 0, 44)
-    boxToggle.Text = espBoxesEnabled and "ON" or "OFF"
-    boxToggle.BackgroundColor3 = espBoxesEnabled and Color3.fromRGB(200,30,30) or Color3.fromRGB(80,80,80)
-    boxToggle.TextColor3 = Color3.fromRGB(255,255,255)
-    boxToggle.Font = Enum.Font.SourceSansBold
-    boxToggle.TextSize = 14
-    boxToggle.Parent = content
-    Instance.new("UICorner", boxToggle).CornerRadius = UDim.new(0,6)
+        -- Label for ON/OFF inside switch (small)
+        local tiny = Instance.new("TextLabel")
+        tiny.Size = UDim2.new(1, -4, 1, 0)
+        tiny.Position = UDim2.new(0, 2, 0, 0)
+        tiny.BackgroundTransparency = 1
+        tiny.Text = initial and "ON" or "OFF"
+        tiny.TextColor3 = Color3.fromRGB(255,255,255)
+        tiny.Font = Enum.Font.Gotham
+        tiny.TextSize = 12
+        tiny.Parent = switchBack
 
-    -- Footer / Resize handle
-    local footer = Instance.new("Frame")
-    footer.Size = UDim2.new(1, 0, 0, 10)
-    footer.Position = UDim2.new(0, 0, 1, -10)
-    footer.BackgroundTransparency = 1
-    footer.Parent = mainFrame
+        return switchBack, knob, tiny
+    end
 
-    local resizeGrip = Instance.new("ImageLabel")
-    resizeGrip.Size = UDim2.new(0, 14, 0, 14)
-    resizeGrip.Position = UDim2.new(1, -18, 1, -18)
-    resizeGrip.BackgroundTransparency = 1
-    resizeGrip.Image = "rbxassetid://6023426915" -- маленький треугольник
-    resizeGrip.Parent = mainFrame
+    -- Create sliders
+    local y = 0
+    local pSwitch, pKnob, pTiny = makeSliderRow(content, y, "ESP Players (Green = Team, Red = Enemy)", espPlayersEnabled)
+    y = y + 44
+    local bSwitch, bKnob, bTiny = makeSliderRow(content, y, "ESP Chests (Blue - Interactables)", espBoxesEnabled)
 
-    -- Логика кнопок
-    local isMinimized = false
-    local isMaximized = false
-    local storedSize = mainFrame.Size
-    local storedPos = mainFrame.Position
-
-    btnClose.MouseButton1Click:Connect(function()
-        screenGui:Destroy()
-        clearAllHighlights()
-    end)
-
+    -- Minimize behaviour: toggle visibility
+    local isMin = false
     btnMin.MouseButton1Click:Connect(function()
-        if not isMinimized then
-            storedSize = mainFrame.Size
-            storedPos = mainFrame.Position
-            mainFrame.Size = UDim2.new(0, 220, 0, 30)
-            mainFrame.Position = UDim2.new(mainFrame.Position.X.Scale, mainFrame.Position.X.Offset, mainFrame.Position.Y.Scale, mainFrame.Position.Y.Offset)
-            isMinimized = true
-        else
-            mainFrame.Size = storedSize
-            mainFrame.Position = storedPos
-            isMinimized = false
-        end
+        isMin = not isMin
+        mainFrame.Visible = not isMin
     end)
 
-    btnMax.MouseButton1Click:Connect(function()
-        if not isMaximized then
-            storedSize = mainFrame.Size
-            storedPos = mainFrame.Position
-            mainFrame.Size = UDim2.new(0.9, 0, 0.8, 0)
-            mainFrame.Position = UDim2.new(0.05, 0, 0.1, 0)
-            isMaximized = true
-            isMinimized = false
-        else
-            mainFrame.Size = storedSize
-            mainFrame.Position = storedPos
-            isMaximized = false
-        end
-    end)
-
-    -- Toggle handlers
-    playerToggle.MouseButton1Click:Connect(function()
-        espPlayersEnabled = not espPlayersEnabled
-        playerToggle.Text = espPlayersEnabled and "ON" or "OFF"
-        playerToggle.BackgroundColor3 = espPlayersEnabled and Color3.fromRGB(200,30,30) or Color3.fromRGB(80,80,80)
-        if not espPlayersEnabled then
-            -- удалить подсветки игроков
-            for _, plr in pairs(Players:GetPlayers()) do
-                if plr.Character then
-                    local h = plr.Character:FindFirstChild("ESPHighlight")
-                    if h and h:IsA("Highlight") then h:Destroy() end
-                end
+    -- Logo island click toggles menu visibility, but the island is draggable
+    local function toggleMenuVisible()
+        local gui = PlayerGui:FindFirstChild("WeHubESPMenu")
+        if gui then
+            gui.Enabled = not gui.Enabled
+            if not gui.Enabled then
+                clearAllHighlights()
             end
         end
-    end)
+    end
+    logoIsland.MouseButton1Click = nil -- Frame doesn't have this, we'll add activator
+    local logoAct = Instance.new("TextButton")
+    logoAct.Size = UDim2.new(1,0,1,0)
+    logoAct.BackgroundTransparency = 1
+    logoAct.Text = ""
+    logoAct.Parent = logoIsland
+    logoAct.MouseButton1Click:Connect(toggleMenuVisible)
 
-    boxToggle.MouseButton1Click:Connect(function()
-        espBoxesEnabled = not espBoxesEnabled
-        boxToggle.Text = espBoxesEnabled and "ON" or "OFF"
-        boxToggle.BackgroundColor3 = espBoxesEnabled and Color3.fromRGB(200,30,30) or Color3.fromRGB(80,80,80)
-        if not espBoxesEnabled then
-            -- удалить подсветки сундуков
-            for _, obj in pairs(Workspace:GetDescendants()) do
-                if (obj:IsA("Model") or obj:IsA("BasePart")) and obj:FindFirstChild("ESPHighlight") then
-                    local h = obj:FindFirstChild("ESPHighlight")
-                    if h and h:IsA("Highlight") then h:Destroy() end
-                end
+    -- Toggle handlers with smooth tween (knob slide)
+    local function setupSwitch(switchBack, knob, tiny, getVar, setVar)
+        local on = getVar()
+        local function updateUI(state)
+            tiny.Text = state and "ON" or "OFF"
+            local targetX = state and switchBack.Size.X.Offset - knob.Size.X.Offset - 4 or 2
+            local tween = TweenService:Create(knob, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Position = UDim2.new(0, targetX, 0, 2)})
+            knob.BackgroundColor3 = state and Color3.fromRGB(200,30,30) or Color3.fromRGB(140,140,140)
+            tween:Play()
+        end
+        -- initialize position
+        updateUI(on)
+
+        local activator = Instance.new("TextButton")
+        activator.Size = UDim2.new(1,0,1,0)
+        activator.BackgroundTransparency = 1
+        activator.Text = ""
+        activator.Parent = switchBack
+        activator.MouseButton1Click:Connect(function()
+            on = not on
+            setVar(on)
+            pcall(function() updateUI(on) end)
+            if switchBack == pSwitch then
+                espPlayersEnabled = on
+                if not on then clearAllHighlights() end
+            elseif switchBack == bSwitch then
+                espBoxesEnabled = on
+                if not on then clearAllHighlights() end
             end
+        end)
+    end
+
+    setupSwitch(pSwitch, pKnob, pTiny, function() return espPlayersEnabled end, function(v) espPlayersEnabled = v end)
+    setupSwitch(bSwitch, bKnob, bTiny, function() return espBoxesEnabled end, function(v) espBoxesEnabled = v end)
+
+    -- Dragging support for mainFrame (works with mouse and touch)
+    do
+        local dragging = false
+        local dragInput, dragStart, startPos
+
+        local function update(input)
+            local delta = input.Position - dragStart
+            mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
         end
-    end)
 
-    -- Перетаскивание окна (drag)
-    local dragging = false
-    local dragStart
-    local startPos
+        mainFrame.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                dragging = true
+                dragStart = input.Position
+                startPos = mainFrame.Position
+                input.Changed:Connect(function()
+                    if input.UserInputState == Enum.UserInputState.End then
+                        dragging = false
+                    end
+                end)
+            end
+        end)
 
-    titleBar.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragging = true
-            dragStart = input.Position
-            startPos = mainFrame.Position
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then
-                    dragging = false
-                end
-            end)
-        end
-    end)
+        mainFrame.InputChanged:Connect(function(input)
+            if (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) and dragging and dragStart and startPos then
+                update(input)
+            end
+        end)
+    end
 
-    titleBar.InputChanged:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseMovement then
-            if dragging and dragStart and startPos then
+    -- Dragging for logo island (so user can move the small logo separately)
+    do
+        local dragging = false
+        local dragStart, startPos
+        logoIsland.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                dragging = true
+                dragStart = input.Position
+                startPos = logoIsland.Position
+                input.Changed:Connect(function()
+                    if input.UserInputState == Enum.UserInputState.End then
+                        dragging = false
+                    end
+                end)
+            end
+        end)
+        logoIsland.InputChanged:Connect(function(input)
+            if (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) and dragging and dragStart and startPos then
                 local delta = input.Position - dragStart
-                local newX = startPos.X.Offset + delta.X
-                local newY = startPos.Y.Offset + delta.Y
-                mainFrame.Position = UDim2.new(startPos.X.Scale, newX, startPos.Y.Scale, newY)
+                logoIsland.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
             end
-        end
-    end)
-
-    -- Изменение размера (resize)
-    local resizing = false
-    local resizeStart
-    local startSize
-
-    resizeGrip.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            resizing = true
-            resizeStart = input.Position
-            startSize = mainFrame.Size
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then
-                    resizing = false
-                end
-            end)
-        end
-    end)
-
-    resizeGrip.InputChanged:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseMovement then
-            if resizing and resizeStart and startSize then
-                local delta = input.Position - resizeStart
-                local newW = math.clamp(startSize.X.Offset + delta.X, 220, 1000)
-                local newH = math.clamp(startSize.Y.Offset + delta.Y, 36, 800)
-                mainFrame.Size = UDim2.new(0, newW, 0, newH)
-            end
-        end
-    end)
+        end)
+    end
 
 end
 
 -- Создаем меню при старте
 createMenu()
 
--- Если нужно, можно добавить клавишу для быстрого скрытия/показа (например, клавиша M)
-local UIS = game:GetService("UserInputService")
+-- Быстрое скрытие/показ клавишей M
 local visible = true
 UIS.InputBegan:Connect(function(input, gp)
     if gp then return end
