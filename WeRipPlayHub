@@ -2,6 +2,7 @@
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local CollectionService = game:GetService("CollectionService")
+local TweenService = game:GetService("TweenService")
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 local UIS = game:GetService("UserInputService")
@@ -18,6 +19,14 @@ local TEAM_COLOR = Color3.fromRGB(0, 255, 0)    -- зеленый для тим�
 local ENEMY_COLOR = Color3.fromRGB(255, 0, 0)   -- красный для врагов
 local CHEST_COLOR = Color3.fromRGB(0, 162, 255) -- синий для интерактивных сундуков
 
+-- Кэши для подсветок, чтобы не пересоздавать их каждый цикл
+local playerHighlights = {}
+local chestHighlights = {}
+
+-- Параметры оптимизации
+local CHEST_SCAN_INTERVAL = 4       -- раз в N секунд сканировать мир на сундуки
+local CHEST_MAX_DISTANCE = 200      -- проверять объекты только в радиусе (studs)
+
 -- Вспомогательная функция: создание/обновление Highlight
 local function createHighlight(object, fillColor, outlineColor)
     if not object then return end
@@ -25,7 +34,7 @@ local function createHighlight(object, fillColor, outlineColor)
     if existing and existing:IsA("Highlight") then
         existing.FillColor = fillColor
         existing.OutlineColor = outlineColor or Color3.fromRGB(255,255,255)
-        return
+        return existing
     end
 
     local highlight = Instance.new("Highlight")
@@ -36,150 +45,188 @@ local function createHighlight(object, fillColor, outlineColor)
     highlight.OutlineTransparency = 0
     highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
     highlight.Parent = object
+    return highlight
 end
 
 -- Удаление всех подсветок (полезно при выключении)
 local function clearAllHighlights()
-    -- Обход игроков
-    for _, plr in pairs(Players:GetPlayers()) do
-        if plr.Character then
-            local h = plr.Character:FindFirstChild("ESPHighlight")
-            if h and h:IsA("Highlight") then h:Destroy() end
-        end
+    for plr, h in pairs(playerHighlights) do
+        if h and h.Parent then pcall(function() h:Destroy() end) end
     end
-    -- Обход мира
-    for _, obj in pairs(Workspace:GetDescendants()) do
-        if obj:IsA("Model") or obj:IsA("BasePart") then
-            local h = obj:FindFirstChild("ESPHighlight")
-            if h and h:IsA("Highlight") then h:Destroy() end
-        end
+    table.clear(playerHighlights)
+
+    for obj, h in pairs(chestHighlights) do
+        if h and h.Parent then pcall(function() h:Destroy() end) end
+    end
+    table.clear(chestHighlights)
+end
+
+-- Удаляет подсветку для конкретного объекта
+local function removeChestHighlight(obj)
+    local h = chestHighlights[obj]
+    if h then
+        pcall(function() h:Destroy() end)
+        chestHighlights[obj] = nil
     end
 end
 
--- Определение: являются ли игроки тиммейтами
-local function isTeammate(targetPlayer)
-    if not targetPlayer or targetPlayer == LocalPlayer then return false end
-
-    -- 1) Стандартные Teams
-    if targetPlayer.Team and LocalPlayer.Team then
-        if targetPlayer.Team == LocalPlayer.Team then return true end
+-- PLAYER ESP: управление на событиях (не постоянный полный скан)
+local function onCharacterAdded(player, character)
+    if player == LocalPlayer then return end
+    -- создаём Highlight, но только когда включено
+    if espPlayersEnabled and character then
+        local ok, h = pcall(function() return createHighlight(character, isTeammate and TEAM_COLOR or ENEMY_COLOR end)
+        end)
+        -- above is just placeholder; we'll set color below properly
     end
-
-    -- 2) Кастомные роли (Role / Status)
-    local myRole = LocalPlayer:FindFirstChild("Role") or LocalPlayer:FindFirstChild("Status")
-    local targetRole = targetPlayer:FindFirstChild("Role") or targetPlayer:FindFirstChild("Status")
-    if myRole and targetRole and myRole.Value == targetRole.Value then
-        return true
-    end
-
-    -- 3) Атрибуты
-    if LocalPlayer:GetAttribute("Role") and targetPlayer:GetAttribute("Role") then
-        return LocalPlayer:GetAttribute("Role") == targetPlayer:GetAttribute("Role")
-    end
-
-    return false
 end
 
--- Определение: можно ли взаимодействовать с объектом ( сундук/коробка )
-local function isInteractable(obj)
-    if not obj then return false end
-
-    -- 1) Если у объекта или у какой-то его части есть ProximityPrompt
-    if obj:FindFirstChildOfClass("ProximityPrompt") then return true end
-    -- Также проверяем потомков (части модели)
-    for _, descendant in pairs(obj:GetDescendants()) do
-        if descendant:IsA("ProximityPrompt") then return true end
-        if descendant:IsA("ClickDetector") then return true end
-    end
-
-    -- 2) Наличие ClickDetector
-    if obj:FindFirstChildOfClass("ClickDetector") then return true end
-
-    -- 3) Атрибут CanInteract == true
-    if obj:GetAttribute("CanInteract") == true then return true end
-
-    -- 4) Наличие child с именем "Interaction" или "Interact"
-    if obj:FindFirstChild("Interaction") or obj:FindFirstChild("Interact") then return true end
-
-    -- 5) Тэг через CollectionService: "Interactable"
-    if CollectionService:HasTag(obj, "Interactable") then return true end
-
-    return false
-end
-
--- Обновление ESP игроков
-local function updatePlayersESP()
-    if not espPlayersEnabled then
-        -- при выключенном ESP игроков — удаляем их подсветки
-        for _, plr in pairs(Players:GetPlayers()) do
-            if plr.Character then
-                local h = plr.Character:FindFirstChild("ESPHighlight")
-                if h and h:IsA("Highlight") then h:Destroy() end
-            end
+-- Функция, которая создаёт/обновляет подсветку игрока, вызывается при spawn и при смене состояния
+local function ensurePlayerHighlight(player)
+    if not player or player == LocalPlayer then return end
+    local char = player.Character
+    if not char or not char:IsDescendantOf(game) then
+        -- cleanup if existed
+        if playerHighlights[player] then
+            pcall(function() playerHighlights[player]:Destroy() end)
+            playerHighlights[player] = nil
         end
         return
     end
 
-    for _, player in pairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
-            local color = isTeammate(player) and TEAM_COLOR or ENEMY_COLOR
-            createHighlight(player.Character, color, Color3.fromRGB(255,255,255))
-        end
-    end
-end
-
--- Обновление ESP сундуков/коробок (только интерактивных)
-local function updateChestsESP()
-    if not espBoxesEnabled then
-        -- удалить все подсветки сундуков
-        for _, obj in pairs(Workspace:GetDescendants()) do
-            if (obj:IsA("Model") or obj:IsA("BasePart")) and obj:FindFirstChild("ESPHighlight") then
-                local h = obj:FindFirstChild("ESPHighlight")
-                if h and h:IsA("Highlight") then h:Destroy() end
-            end
-        end
+    -- Если уже есть подсветка — обновляем цвет
+    if playerHighlights[player] and playerHighlights[player]:IsA("Highlight") then
+        local color = isTeammate(player) and TEAM_COLOR or ENEMY_COLOR
+        playerHighlights[player].FillColor = color
+        playerHighlights[player].OutlineColor = Color3.fromRGB(255,255,255)
         return
     end
 
-    for _, obj in pairs(Workspace:GetDescendants()) do
-        if obj:IsA("Model") or obj:IsA("BasePart") then
-            local name = tostring(obj.Name):lower()
-            -- базовая проверка по имени, чтобы сужать поиск сундуков/коробок
-            if name:match("chest") or name:match("box") or name:match("crate") or name:match("loot") or name:match("container") then
-                if isInteractable(obj) then
-                    createHighlight(obj, CHEST_COLOR, Color3.fromRGB(255,255,255))
-                else
-                    -- если не интерактивный, убедимся, что подсветки нет
-                    local h = obj:FindFirstChild("ESPHighlight")
-                    if h and h:IsA("Highlight") then h:Destroy() end
-                end
+    -- Создаём и кэшируем
+    local color = isTeammate(player) and TEAM_COLOR or ENEMY_COLOR
+    local h = createHighlight(char, color, Color3.fromRGB(255,255,255))
+    playerHighlights[player] = h
+end
+
+-- Подключаем обработчики для игроков
+Players.PlayerAdded:Connect(function(player)
+    player.CharacterAdded:Connect(function(char)
+        -- небольшой таймаут чтобы части персонажа успели создаться
+        task.wait(0.1)
+        if espPlayersEnabled then ensurePlayerHighlight(player) end
+    end)
+    player.CharacterRemoving:Connect(function()
+        if playerHighlights[player] then
+            pcall(function() playerHighlights[player]:Destroy() end)
+            playerHighlights[player] = nil
+        end
+    end)
+end)
+
+-- Инициализируем для уже подключённых игроков
+for _, p in pairs(Players:GetPlayers()) do
+    if p.Character then
+        p.CharacterAdded:Connect(function() if espPlayersEnabled then ensurePlayerHighlight(p) end end)
+        p.CharacterRemoving:Connect(function() if playerHighlights[p] then pcall(function() playerHighlights[p]:Destroy() end); playerHighlights[p]=nil end end)
+        if espPlayersEnabled then ensurePlayerHighlight(p) end
+    else
+        p.CharacterAdded:Connect(function() if espPlayersEnabled then ensurePlayerHighlight(p) end end)
+    end
+end
+
+-- CHEST ESP: ограниченный скан, кэш и дистанция
+local function isObjectClose(obj)
+    if not LocalPlayer.Character then return false end
+    local hrp = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+    local pos
+    if obj:IsA("BasePart") then
+        pos = obj.Position
+    elseif obj:IsA("Model") then
+        local primary = obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
+        if primary then pos = primary.Position end
+    end
+    if not pos then return false end
+    return (pos - hrp.Position).Magnitude <= CHEST_MAX_DISTANCE
+end
+
+local chestNamePatterns = { "chest", "box", "crate", "loot", "container" }
+
+local function nameLooksLikeChest(name)
+    if not name then return false end
+    local lname = tostring(name):lower()
+    for _, pat in ipairs(chestNamePatterns) do
+        if lname:match(pat) then return true end
+    end
+    return false
+end
+
+local function scanForChests()
+    -- Сначала подсвечиваем специально помеченные объекты
+    local tagged = CollectionService:GetTagged("Interactable")
+    for _, obj in ipairs(tagged) do
+        if obj and obj.Parent and isInteractable(obj) and isObjectClose(obj) then
+            if not chestHighlights[obj] then chestHighlights[obj] = createHighlight(obj, CHEST_COLOR, Color3.fromRGB(255,255,255)) end
+        else
+            removeChestHighlight(obj)
+        end
+    end
+
+    -- Затем ограниченный обход мира: только объекты с подходящими именами и в пределах дистанции
+    for _, obj in ipairs(Workspace:GetDescendants()) do
+        if (obj:IsA("Model") or obj:IsA("BasePart")) and nameLooksLikeChest(obj.Name) then
+            if isInteractable(obj) and isObjectClose(obj) then
+                if not chestHighlights[obj] then chestHighlights[obj] = createHighlight(obj, CHEST_COLOR, Color3.fromRGB(255,255,255)) end
             else
-                -- дополнительно: если объект помечен тэгом Interactable, тоже подсвечиваем
-                if CollectionService:HasTag(obj, "Interactable") and isInteractable(obj) then
-                    createHighlight(obj, CHEST_COLOR, Color3.fromRGB(255,255,255))
-                end
+                removeChestHighlight(obj)
             end
+        end
+    end
+
+    -- Удаляем подсветки для объектов, которых больше нет
+    for obj, h in pairs(chestHighlights) do
+        if not obj or not obj.Parent then
+            pcall(function() h:Destroy() end)
+            chestHighlights[obj] = nil
         end
     end
 end
 
--- Фоновый цикл обновления ESP
+-- Фоновый цикл для скана сундуков с интервалом
 task.spawn(function()
     while true do
-        pcall(updatePlayersESP)
-        pcall(updateChestsESP)
-        task.wait(2)
+        if espBoxesEnabled then
+            pcall(scanForChests)
+        else
+            -- если выключено — чистим
+            for obj, h in pairs(chestHighlights) do pcall(function() h:Destroy() end); chestHighlights[obj]=nil end
+        end
+        task.wait(CHEST_SCAN_INTERVAL)
+    end
+end)
+
+-- ОБНОВЛЕНИЕ для игроков: обновляем цвета каждые N секунд, но основное делаем через события
+task.spawn(function()
+    while true do
+        if espPlayersEnabled then
+            for _, player in pairs(Players:GetPlayers()) do
+                if player ~= LocalPlayer then
+                    ensurePlayerHighlight(player)
+                end
+            end
+        else
+            for p, h in pairs(playerHighlights) do pcall(function() h:Destroy() end); playerHighlights[p]=nil end
+        end
+        task.wait(2.5) -- редкий обновляющий цикл для цветов/новых игроков
     end
 end)
 
 -- Простая попытка авто-лута (будет пытаться активировать ProximityPrompt/ClickDetector через безопасные pcall вызовы)
 local function attemptInteract(obj)
     if not obj then return false end
-    -- Ищем ProximityPrompt
     for _, prompt in pairs(obj:GetDescendants()) do
         if prompt:IsA("ProximityPrompt") then
             pcall(function()
-                -- несколько возможных вариантов методов, на случай разных реализаций
                 if prompt.Trigger then
                     prompt:Trigger(LocalPlayer)
                 elseif prompt.Fire then
@@ -201,17 +248,9 @@ local function attemptInteract(obj)
             return true
         end
     end
-
-    -- Если у самого obj есть методы/атрибуты
     if obj:IsA("Tool") then
-        pcall(function()
-            if obj.Parent and obj.Parent:IsA("Backpack") then
-                -- попытка взять в инвентарь — noop на клиенте
-            end
-        end)
         return true
     end
-
     return false
 end
 
@@ -219,40 +258,24 @@ end
 task.spawn(function()
     while true do
         if autoLootEnabled then
-            for _, obj in pairs(Workspace:GetDescendants()) do
-                local ok = false
-                if isInteractable(obj) then
-                    pcall(function()
-                        ok = attemptInteract(obj)
-                        -- Если объект модель — пытаться взаимодействовать с его PrimaryPart
-                        if not ok and obj:IsA("Model") then
-                            local primary = obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
-                            if primary and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
-                                local saved = LocalPlayer.Character.HumanoidRootPart.CFrame
-                                LocalPlayer.Character.HumanoidRootPart.CFrame = primary.CFrame + Vector3.new(0, 3, 0)
-                                task.wait(0.2)
-                                attemptInteract(obj)
-                                task.wait(0.1)
-                                LocalPlayer.Character.HumanoidRootPart.CFrame = saved
-                            end
-                        end
-                    end)
+            -- проходим только по ближайшим объектам для экономии
+            for _, obj in ipairs(Workspace:GetDescendants()) do
+                if (obj:IsA("Model") or obj:IsA("BasePart")) and nameLooksLikeChest(obj.Name) and isObjectClose(obj) and isInteractable(obj) then
+                    pcall(function() attemptInteract(obj) end)
                 end
             end
         end
-        task.wait(0.8)
+        task.wait(1)
     end
 end)
 
 -- Анти-AFK — эмулируем лёгкие действия мыши/клавиш, чтобы игра не считала игрока AFK
--- Я могу помочь с анти-AFK (простая реализация ниже). Я НЕ буду помогать с обходом бана/кика от разработчиков (см. сообщение при коммите).
 local function startAntiAFK()
     if antiAFKEnabled then return end
     antiAFKEnabled = true
     task.spawn(function()
         while antiAFKEnabled do
             pcall(function()
-                -- захват контроллера виртуальным юзером и клик
                 VirtualUser:CaptureController()
                 VirtualUser:ClickButton1(Vector2.new(0,0))
             end)
@@ -266,16 +289,56 @@ local function stopAntiAFK()
 end
 
 -- ============================
--- GUI: Улучшенное стильное меню (красно-чёрное) с логотипом/сворачиванием и авто-лутом
--- Добавлено: плавающий островок (Floating Button), который можно перетаскивать и которым можно сворачивать/разворачивать меню
--- Исправлено: Drag поддерживает Touch (мобильные устройства)
+-- UI: переключатели-ползунки (switches) + оптимизированная логика
 -- ============================
+
+-- Helper: создаёт переключатель-ползунок, возвращает switchFrame и функцию установки состояния
+local function makeSwitch(parent, position, initialState)
+    local sw = Instance.new("Frame")
+    sw.Size = UDim2.new(0, 52, 0, 26)
+    sw.Position = position
+    sw.BackgroundColor3 = initialState and Color3.fromRGB(0,150,0) or Color3.fromRGB(80,80,80)
+    sw.Parent = parent
+    sw.Active = true
+    sw.Name = "Switch"
+    Instance.new("UICorner", sw).CornerRadius = UDim.new(0, 12)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 22, 0, 22)
+    knob.Position = initialState and UDim2.new(1, -24, 0, 2) or UDim2.new(0, 2, 0, 2)
+    knob.BackgroundColor3 = Color3.fromRGB(245,245,245)
+    knob.Parent = sw
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(0, 12)
+
+    local tweenInfo = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+    local function setState(state)
+        sw.BackgroundColor3 = state and Color3.fromRGB(0,150,0) or Color3.fromRGB(80,80,80)
+        local targetPos = state and UDim2.new(1, -24, 0, 2) or UDim2.new(0, 2, 0, 2)
+        TweenService:Create(knob, tweenInfo, {Position = targetPos}):Play()
+    end
+
+    -- Interaction
+    sw.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            initialState = not initialState
+            setState(initialState)
+            -- emit custom event via property
+            sw:SetAttribute("State", initialState)
+        end
+    end)
+
+    -- set initial
+    sw:SetAttribute("State", initialState)
+
+    return sw, setState
+end
+
+-- Создаём меню (обновлённое) и используем переключатели
 local function createMenu()
     -- Удаляем старое меню, если есть
     local existingGui = PlayerGui:FindFirstChild("WeHubESPMenu")
     if existingGui then existingGui:Destroy() end
-    local existingFloat = PlayerGui:FindFirstChild("WeHubFloat")
-    if existingFloat then existingFloat:Destroy() end
 
     local screenGui = Instance.new("ScreenGui")
     screenGui.Name = "WeHubESPMenu"
@@ -284,159 +347,86 @@ local function createMenu()
 
     local mainFrame = Instance.new("Frame")
     mainFrame.Name = "Main"
-    mainFrame.Size = UDim2.new(0, 420, 0, 240)
+    mainFrame.Size = UDim2.new(0, 420, 0, 220)
     mainFrame.Position = UDim2.new(0.55, 0, 0.15, 0)
     mainFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
     mainFrame.BorderSizePixel = 0
     mainFrame.Parent = screenGui
-    mainFrame.Active = true -- для корректной обработки ввода
+    mainFrame.Active = true
+    Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 14)
+    local stroke = Instance.new("UIStroke", mainFrame); stroke.Thickness = 1; stroke.Color = Color3.fromRGB(60,0,0)
 
-    local uic = Instance.new("UICorner")
-    uic.CornerRadius = UDim.new(0, 14) -- более закруглённые углы
-    uic.Parent = mainFrame
-
-    -- Лёгкий border
-    local stroke = Instance.new("UIStroke")
-    stroke.Thickness = 1
-    stroke.Color = Color3.fromRGB(60, 0, 0)
-    stroke.Parent = mainFrame
-
-    -- Gradient
-    local grad = Instance.new("UIGradient")
-    grad.Color = ColorSequence.new({
-        ColorSequenceKeypoint.new(0, Color3.fromRGB(30, 0, 0)),
-        ColorSequenceKeypoint.new(1, Color3.fromRGB(18, 18, 18)),
-    })
-    grad.Rotation = 270
-    grad.Parent = mainFrame
-
-    -- Titlebar
     local titleBar = Instance.new("Frame")
     titleBar.Name = "TitleBar"
-    titleBar.Size = UDim2.new(1, 0, 0, 40)
+    titleBar.Size = UDim2.new(1, 0, 0, 36)
     titleBar.Position = UDim2.new(0, 0, 0, 0)
     titleBar.BackgroundTransparency = 1
-    titleBar.BorderSizePixel = 0
     titleBar.Parent = mainFrame
 
-    local logo = Instance.new("ImageButton")
-    logo.Name = "Logo"
-    logo.Size = UDim2.new(0, 32, 0, 32)
-    logo.Position = UDim2.new(0, 10, 0, 4)
-    logo.BackgroundTransparency = 1
-    -- Поставьте сюда ваш assetId логотипа, если есть
-    logo.Image = "rbxassetid://6023426915"
-    logo.Parent = titleBar
-
     local title = Instance.new("TextLabel")
-    title.Name = "Title"
-    title.Size = UDim2.new(1, -140, 1, 0)
-    title.Position = UDim2.new(0, 52, 0, 0)
+    title.Size = UDim2.new(1, -80, 1, 0)
+    title.Position = UDim2.new(0, 12, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "WeHub ESP — Improved"
-    title.TextColor3 = Color3.fromRGB(255, 220, 220)
-    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Text = "WeHub ESP — Optimized"
+    title.TextColor3 = Color3.fromRGB(255,220,220)
     title.Font = Enum.Font.GothamBold
-    title.TextSize = 18
+    title.TextSize = 16
+    title.TextXAlignment = Enum.TextXAlignment.Left
     title.Parent = titleBar
 
-    -- Controls on the right
     local btnClose = Instance.new("TextButton")
-    btnClose.Name = "Close"
     btnClose.Size = UDim2.new(0, 28, 0, 28)
-    btnClose.Position = UDim2.new(1, -36, 0, 6)
-    btnClose.BackgroundColor3 = Color3.fromRGB(170, 0, 0)
+    btnClose.Position = UDim2.new(1, -36, 0, 4)
+    btnClose.BackgroundColor3 = Color3.fromRGB(170,0,0)
     btnClose.Text = "X"
     btnClose.Font = Enum.Font.GothamBold
-    btnClose.TextSize = 16
-    btnClose.TextColor3 = Color3.fromRGB(255,255,255)
     btnClose.Parent = titleBar
     Instance.new("UICorner", btnClose).CornerRadius = UDim.new(0,6)
 
-    local btnMin = Instance.new("TextButton")
-    btnMin.Name = "Min"
-    btnMin.Size = UDim2.new(0, 28, 0, 28)
-    btnMin.Position = UDim2.new(1, -72, 0, 6)
-    btnMin.BackgroundColor3 = Color3.fromRGB(120, 0, 0)
-    btnMin.Text = "—"
-    btnMin.Font = Enum.Font.Gotham
-    btnMin.TextSize = 16
-    btnMin.TextColor3 = Color3.fromRGB(255,255,255)
-    btnMin.Parent = titleBar
-    Instance.new("UICorner", btnMin).CornerRadius = UDim.new(0,6)
-
-    -- Content area
+    -- Content
     local content = Instance.new("Frame")
-    content.Name = "Content"
-    content.Size = UDim2.new(1, -20, 1, -62)
-    content.Position = UDim2.new(0, 10, 0, 52)
+    content.Size = UDim2.new(1, -20, 1, -56)
+    content.Position = UDim2.new(0, 10, 0, 44)
     content.BackgroundTransparency = 1
     content.Parent = mainFrame
 
-    -- Helper to create labelled toggle rows
-    local function makeToggleRow(parent, yOffset, labelText, initial)
-        local label = Instance.new("TextLabel")
-        label.Size = UDim2.new(0.7, 0, 0, 28)
-        label.Position = UDim2.new(0, 8, 0, yOffset)
-        label.Text = labelText
-        label.TextColor3 = Color3.fromRGB(230,230,230)
-        label.BackgroundTransparency = 1
-        label.Font = Enum.Font.Gotham
-        label.TextSize = 14
-        label.TextXAlignment = Enum.TextXAlignment.Left
-        label.Parent = parent
+    -- Rows
+    local y = 0
+    local function addRow(labelText, initialState)
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(0.7, 0, 0, 28)
+        lbl.Position = UDim2.new(0, 8, 0, y)
+        lbl.Text = labelText
+        lbl.BackgroundTransparency = 1
+        lbl.TextColor3 = Color3.fromRGB(230,230,230)
+        lbl.Font = Enum.Font.Gotham
+        lbl.TextSize = 14
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.Parent = content
 
-        local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(0, 72, 0, 26)
-        btn.Position = UDim2.new(1, -88, 0, yOffset)
-        btn.Text = initial and "ON" or "OFF"
-        btn.BackgroundColor3 = initial and Color3.fromRGB(0,150,0) or Color3.fromRGB(80,80,80)
-        btn.TextColor3 = Color3.fromRGB(255,255,255)
-        btn.Font = Enum.Font.GothamBold
-        btn.TextSize = 14
-        btn.Parent = parent
-        Instance.new("UICorner", btn).CornerRadius = UDim.new(0,6)
-
-        return label, btn
+        local sw, setState = makeSwitch(content, UDim2.new(1, -88, 0, y), initialState)
+        y = y + 36
+        return sw, setState
     end
 
-    -- Rows
-    local rowY = 0
-    local pLabel, pToggle = makeToggleRow(content, rowY, "ESP Players (Green = Team, Red = Enemy)", espPlayersEnabled)
-    rowY = rowY + 36
-    local bLabel, bToggle = makeToggleRow(content, rowY, "ESP Chests (Blue - Interactables)", espBoxesEnabled)
-    rowY = rowY + 36
-    local lootLabel, lootToggle = makeToggleRow(content, rowY, "Auto Loot (attempt)", autoLootEnabled)
-    rowY = rowY + 36
-    local afkLabel, afkToggle = makeToggleRow(content, rowY, "Anti-AFK (simple)", antiAFKEnabled)
-    rowY = rowY + 36
+    local swPlayers, setPlayers = addRow("ESP Players (green = team, red = enemy)", espPlayersEnabled)
+    local swChests, setChests = addRow("ESP Chests (blue - interactables)", espBoxesEnabled)
+    local swLoot, setLoot = addRow("Auto Loot (attempt)", autoLootEnabled)
+    local swAFK, setAFK = addRow("Anti-AFK (simple)", antiAFKEnabled)
 
-    -- Footer note
-    local note = Instance.new("TextLabel")
-    note.Size = UDim2.new(1, -16, 0, 22)
-    note.Position = UDim2.new(0, 8, 1, -28)
-    note.BackgroundTransparency = 1
-    note.Text = "WeHub — улучшенный интерфейс. Anti-ban/anti-kick не будут реализованы по этическим и политическим причинам."
-    note.TextColor3 = Color3.fromRGB(180,180,180)
-    note.Font = Enum.Font.Gotham
-    note.TextSize = 10
-    note.TextXAlignment = Enum.TextXAlignment.Left
-    note.Parent = mainFrame
+    -- Footer
+    local footer = Instance.new("TextLabel")
+    footer.Size = UDim2.new(1, -16, 0, 18)
+    footer.Position = UDim2.new(0, 8, 1, -26)
+    footer.BackgroundTransparency = 1
+    footer.Text = "Optimized scans: players via events, chests limited by distance and interval."
+    footer.TextColor3 = Color3.fromRGB(180,180,180)
+    footer.Font = Enum.Font.Gotham
+    footer.TextSize = 11
+    footer.TextXAlignment = Enum.TextXAlignment.Left
+    footer.Parent = mainFrame
 
-    -- Resize handle
-    local resizeGrip = Instance.new("ImageLabel")
-    resizeGrip.Size = UDim2.new(0, 16, 0, 16)
-    resizeGrip.Position = UDim2.new(1, -22, 1, -22)
-    resizeGrip.BackgroundTransparency = 1
-    resizeGrip.Image = "rbxassetid://6023426915"
-    resizeGrip.Parent = mainFrame
-
-    -- Логика кнопок
-    local isMinimized = false
-    local isMaximized = false
-    local storedSize = mainFrame.Size
-    local storedPos = mainFrame.Position
-
+    -- Handlers
     btnClose.MouseButton1Click:Connect(function()
         screenGui:Destroy()
         local f = PlayerGui:FindFirstChild("WeHubFloat")
@@ -444,134 +434,82 @@ local function createMenu()
         clearAllHighlights()
     end)
 
-    btnMin.MouseButton1Click:Connect(function()
-        if not isMinimized then
-            storedSize = mainFrame.Size
-            storedPos = mainFrame.Position
-            mainFrame.Size = UDim2.new(0, 220, 0, 40)
-            mainFrame.Position = UDim2.new(mainFrame.Position.X.Scale, mainFrame.Position.X.Offset, mainFrame.Position.Y.Scale, mainFrame.Position.Y.Offset)
-            isMinimized = true
-        else
-            mainFrame.Size = storedSize
-            mainFrame.Position = storedPos
-            isMinimized = false
-        end
-    end)
-
-    -- Logo click: свернуть/развернуть (быстрая свёртка)
-    logo.Activated:Connect(function()
-        btnMin:MouseButton1Click()
-    end)
-
-    -- Toggle handlers
-    pToggle.MouseButton1Click:Connect(function()
-        espPlayersEnabled = not espPlayersEnabled
-        pToggle.Text = espPlayersEnabled and "ON" or "OFF"
-        pToggle.BackgroundColor3 = espPlayersEnabled and Color3.fromRGB(0,150,0) or Color3.fromRGB(80,80,80)
-        if not espPlayersEnabled then
-            for _, plr in pairs(Players:GetPlayers()) do
-                if plr.Character then
-                    local h = plr.Character:FindFirstChild("ESPHighlight")
-                    if h and h:IsA("Highlight") then h:Destroy() end
+    -- Sync state when switch attribute changes
+    local function bindSwitch(sw, onChange)
+        sw:GetPropertyChangedSignal("AbsolutePosition"):Connect(function() end) -- noop to keep connection alive
+        sw:GetAttributeChangedSignal = sw.GetAttributeChangedSignal or function() end -- safe
+        -- Poll attribute change (simple, cheap)
+        task.spawn(function()
+            local last = sw:GetAttribute("State")
+            while sw and sw.Parent do
+                local cur = sw:GetAttribute("State")
+                if cur ~= last then
+                    last = cur
+                    onChange(cur)
                 end
+                task.wait(0.12)
             end
-        end
-    end)
+        end)
+    end
 
-    bToggle.MouseButton1Click:Connect(function()
-        espBoxesEnabled = not espBoxesEnabled
-        bToggle.Text = espBoxesEnabled and "ON" or "OFF"
-        bToggle.BackgroundColor3 = espBoxesEnabled and Color3.fromRGB(0,150,0) or Color3.fromRGB(80,80,80)
-        if not espBoxesEnabled then
-            for _, obj in pairs(Workspace:GetDescendants()) do
-                if (obj:IsA("Model") or obj:IsA("BasePart")) and obj:FindFirstChild("ESPHighlight") then
-                    local h = obj:FindFirstChild("ESPHighlight")
-                    if h and h:IsA("Highlight") then h:Destroy() end
-                end
-            end
-        end
-    end)
-
-    lootToggle.MouseButton1Click:Connect(function()
-        autoLootEnabled = not autoLootEnabled
-        lootToggle.Text = autoLootEnabled and "ON" or "OFF"
-        lootToggle.BackgroundColor3 = autoLootEnabled and Color3.fromRGB(0,150,0) or Color3.fromRGB(80,80,80)
-    end)
-
-    afkToggle.MouseButton1Click:Connect(function()
-        antiAFKEnabled = not antiAFKEnabled
-        afkToggle.Text = antiAFKEnabled and "ON" or "OFF"
-        afkToggle.BackgroundColor3 = antiAFKEnabled and Color3.fromRGB(0,150,0) or Color3.fromRGB(80,80,80)
-        if antiAFKEnabled then
-            startAntiAFK()
+    bindSwitch(swPlayers, function(state)
+        espPlayersEnabled = state
+        if not state then
+            for p, h in pairs(playerHighlights) do pcall(function() h:Destroy() end); playerHighlights[p]=nil end
         else
-            stopAntiAFK()
+            for _, p in pairs(Players:GetPlayers()) do if p~=LocalPlayer then ensurePlayerHighlight(p) end end
         end
     end)
 
-    -- Перетаскивание окна (drag) — улучшенная логика, поддержка Touch
+    bindSwitch(swChests, function(state)
+        espBoxesEnabled = state
+        if not state then for obj,h in pairs(chestHighlights) do pcall(function() h:Destroy() end); chestHighlights[obj]=nil end end
+    end)
+
+    bindSwitch(swLoot, function(state)
+        autoLootEnabled = state
+    end)
+
+    bindSwitch(swAFK, function(state)
+        antiAFKEnabled = state
+        if state then startAntiAFK() else stopAntiAFK() end
+    end)
+
+    -- Make menu draggable for touch and mouse
     local dragging = false
-    local dragStart
-    local startPos
-
+    local dragStart, startPos
     local function onInputBegan(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             dragging = true
             dragStart = input.Position
             startPos = mainFrame.Position
             input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then
-                    dragging = false
-                end
+                if input.UserInputState == Enum.UserInputState.End then dragging = false end
             end)
         end
     end
-
     local function onInputChanged(input)
         if (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) and dragging and dragStart and startPos then
             local delta = input.Position - dragStart
-            local newX = startPos.X.Offset + delta.X
-            local newY = startPos.Y.Offset + delta.Y
-            mainFrame.Position = UDim2.new(startPos.X.Scale, newX, startPos.Y.Scale, newY)
+            mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
         end
     end
-
-    -- Подключаем к titleBar и самому mainFrame (чтобы можно было перетаскивать и с телефона)
     titleBar.InputBegan:Connect(onInputBegan)
     titleBar.InputChanged:Connect(onInputChanged)
     mainFrame.InputBegan:Connect(onInputBegan)
     mainFrame.InputChanged:Connect(onInputChanged)
 
-    -- Изменение размера (resize)
-    local resizing = false
-    local resizeStart
-    local startSize
+    -- Ensure initial states are in sync
+    swPlayers:SetAttribute("State", espPlayersEnabled)
+    swChests:SetAttribute("State", espBoxesEnabled)
+    swLoot:SetAttribute("State", autoLootEnabled)
+    swAFK:SetAttribute("State", antiAFKEnabled)
 
-    resizeGrip.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            resizing = true
-            resizeStart = input.Position
-            startSize = mainFrame.Size
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then
-                    resizing = false
-                end
-            end)
-        end
-    end)
+end
 
-    resizeGrip.InputChanged:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseMovement then
-            if resizing and resizeStart and startSize then
-                local delta = input.Position - resizeStart
-                local newW = math.clamp(startSize.X.Offset + delta.X, 220, 1200)
-                local newH = math.clamp(startSize.Y.Offset + delta.Y, 36, 900)
-                mainFrame.Size = UDim2.new(0, newW, 0, newH)
-            end
-        end
-    end)
-
-    -- Создаём плавающий островок (отдельный ScreenGui), который всегда виден и может сворачивать/разворачивать меню
+-- Вставляем встроенный floating button, если есть
+local function ensureFloatExists()
+    if PlayerGui:FindFirstChild("WeHubFloat") then return end
     local floatGui = Instance.new("ScreenGui")
     floatGui.Name = "WeHubFloat"
     floatGui.ResetOnSpawn = false
@@ -586,64 +524,43 @@ local function createMenu()
     floatBtn.BackgroundTransparency = 0
     floatBtn.Image = "rbxassetid://6023426915"
     floatBtn.Parent = floatGui
-    local floatCorner = Instance.new("UICorner")
-    floatCorner.CornerRadius = UDim.new(0,12)
-    floatCorner.Parent = floatBtn
-    local floatStroke = Instance.new("UIStroke")
-    floatStroke.Color = Color3.fromRGB(60, 0, 0)
-    floatStroke.Thickness = 1
-    floatStroke.Parent = floatBtn
+    local floatCorner = Instance.new("UICorner") floatCorner.CornerRadius = UDim.new(0,12) floatCorner.Parent = floatBtn
+    local floatStroke = Instance.new("UIStroke") floatStroke.Color = Color3.fromRGB(60, 0, 0) floatStroke.Thickness = 1 floatStroke.Parent = floatBtn
 
-    -- Dragging the floating button (supports touch and mouse)
+    floatBtn.Active = true
     local draggingFloat = false
-    local floatDragStart
-    local floatStartPos
-
+    local startPos, dragStart
     floatBtn.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             draggingFloat = true
-            floatDragStart = input.Position
-            floatStartPos = floatBtn.Position
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then
-                    draggingFloat = false
-                end
-            end)
+            dragStart = input.Position
+            startPos = floatBtn.Position
+            input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then draggingFloat = false end end)
         end
     end)
-
     floatBtn.InputChanged:Connect(function(input)
-        if (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) and draggingFloat and floatDragStart and floatStartPos then
-            local delta = input.Position - floatDragStart
-            local newX = floatStartPos.X.Offset + delta.X
-            local newY = floatStartPos.Y.Offset + delta.Y
-            floatBtn.Position = UDim2.new(floatStartPos.X.Scale, newX, floatStartPos.Y.Scale, newY)
+        if (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) and draggingFloat and dragStart and startPos then
+            local delta = input.Position - dragStart
+            floatBtn.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
         end
     end)
 
-    -- Activated toggles menu visibility (works for touch & mouse)
     floatBtn.Activated:Connect(function()
         local gui = PlayerGui:FindFirstChild("WeHubESPMenu")
-        if gui and gui:IsA("ScreenGui") then
+        if gui then
             local mf = gui:FindFirstChild("Main")
-            if mf then
-                mf.Visible = not mf.Visible
-                if not mf.Visible then
-                    clearAllHighlights()
-                end
-            end
+            if mf then mf.Visible = not mf.Visible; if not mf.Visible then clearAllHighlights() end end
         else
-            -- если меню удалено, создаём заново
             createMenu()
         end
     end)
-
 end
 
--- Создаем меню при старте
+-- Запускаем меню и float
 createMenu()
+ensureFloatExists()
 
--- Быстрое скрытие/показ клавишей M
+-- Клавиша M для скрытия
 local visible = true
 UIS.InputBegan:Connect(function(input, gp)
     if gp then return end
@@ -652,9 +569,7 @@ UIS.InputBegan:Connect(function(input, gp)
         if gui then
             visible = not visible
             gui.Enabled = visible
-            if not visible then
-                clearAllHighlights()
-            end
+            if not visible then clearAllHighlights() end
         end
     end
 end)
