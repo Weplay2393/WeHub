@@ -156,6 +156,7 @@ end)
 -- ============================
 -- GUI: Улучшенный интерфейс с ползунками и перемещаемым логотипом
 -- Поддержка перетаскивания на мобильных устройствах
+-- Исправления: надежная перетаскиваемость, безопасная минимизация (не прячет весь GUI)
 -- ============================
 local function createMenu()
     local existingGui = PlayerGui:FindFirstChild("WeHubESPMenu")
@@ -175,6 +176,9 @@ local function createMenu()
     mainFrame.BorderSizePixel = 0
     mainFrame.Active = true
     mainFrame.Parent = screenGui
+
+    local originalMainSize = mainFrame.Size
+    local minimizedMainSize = UDim2.new(originalMainSize.X.Scale, originalMainSize.X.Offset, 0, 48) -- высота только титла
 
     local mainCorner = Instance.new("UICorner")
     mainCorner.CornerRadius = UDim.new(0, 16)
@@ -295,30 +299,39 @@ local function createMenu()
     y = y + 44
     local bSwitch, bKnob, bTiny = makeSliderRow(content, y, "ESP Chests (Blue - Interactables)", espBoxesEnabled)
 
-    -- Minimize behaviour: toggle visibility
+    -- Minimize behaviour: теперь скрываем только контент и меняем размер окна
     local isMin = false
-    btnMin.MouseButton1Click:Connect(function()
-        isMin = not isMin
-        mainFrame.Visible = not isMin
-    end)
-
-    -- Logo island click toggles menu visibility, but the island is draggable
-    local function toggleMenuVisible()
-        local gui = PlayerGui:FindFirstChild("WeHubESPMenu")
-        if gui then
-            gui.Enabled = not gui.Enabled
-            if not gui.Enabled then
-                clearAllHighlights()
-            end
+    local function setMinimized(state)
+        isMin = state
+        if isMin then
+            content.Visible = false
+            mainFrame.Size = minimizedMainSize
+        else
+            content.Visible = true
+            mainFrame.Size = originalMainSize
         end
     end
-    logoIsland.MouseButton1Click = nil -- Frame doesn't have this, we'll add activator
+
+    btnMin.MouseButton1Click:Connect(function()
+        setMinimized(not isMin)
+    end)
+
+    -- Logo island click toggles menu visibility (теперь тоже минифицирует/разворачивает, а не убирает весь ScreenGui)
+    local function toggleMenuVisible()
+        setMinimized(not isMin)
+        if not isMin then
+            -- восстановление: ничего дополнительно делать
+        else
+            -- при сворачивании мы не чистим подсветки автоматически - это поведение оставлено
+        end
+    end
+
+    -- Создаем overlay-кнопку для логотипа (она нужна чтобы ловить клики/тачи)
     local logoAct = Instance.new("TextButton")
     logoAct.Size = UDim2.new(1,0,1,0)
     logoAct.BackgroundTransparency = 1
     logoAct.Text = ""
     logoAct.Parent = logoIsland
-    logoAct.MouseButton1Click:Connect(toggleMenuVisible)
 
     -- Toggle handlers with smooth tween (knob slide)
     local function setupSwitch(switchBack, knob, tiny, getVar, setVar)
@@ -355,7 +368,7 @@ local function createMenu()
     setupSwitch(pSwitch, pKnob, pTiny, function() return espPlayersEnabled end, function(v) espPlayersEnabled = v end)
     setupSwitch(bSwitch, bKnob, bTiny, function() return espBoxesEnabled end, function(v) espBoxesEnabled = v end)
 
-    -- Dragging support for mainFrame (works with mouse and touch)
+    -- Dragging support for mainFrame (через TitleBar, надёжнее)
     do
         local dragging = false
         local dragInput, dragStart, startPos
@@ -365,7 +378,7 @@ local function createMenu()
             mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
         end
 
-        mainFrame.InputBegan:Connect(function(input)
+        titleBar.InputBegan:Connect(function(input)
             if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
                 dragging = true
                 dragStart = input.Position
@@ -378,22 +391,25 @@ local function createMenu()
             end
         end)
 
-        mainFrame.InputChanged:Connect(function(input)
+        titleBar.InputChanged:Connect(function(input)
             if (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) and dragging and dragStart and startPos then
                 update(input)
             end
         end)
     end
 
-    -- Dragging for logo island (so user can move the small logo separately)
+    -- Dragging for logo island (реализовано через logoAct, клик игнорируется если был drag)
     do
         local dragging = false
         local dragStart, startPos
-        logoIsland.InputBegan:Connect(function(input)
+        local logoDragged = false
+
+        logoAct.InputBegan:Connect(function(input)
             if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
                 dragging = true
                 dragStart = input.Position
                 startPos = logoIsland.Position
+                logoDragged = false
                 input.Changed:Connect(function()
                     if input.UserInputState == Enum.UserInputState.End then
                         dragging = false
@@ -401,11 +417,25 @@ local function createMenu()
                 end)
             end
         end)
-        logoIsland.InputChanged:Connect(function(input)
+
+        logoAct.InputChanged:Connect(function(input)
             if (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) and dragging and dragStart and startPos then
                 local delta = input.Position - dragStart
+                -- порог чтобы отличать клик от драгa
+                if math.abs(delta.X) > 4 or math.abs(delta.Y) > 4 then
+                    logoDragged = true
+                end
                 logoIsland.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
             end
+        end)
+
+        logoAct.MouseButton1Click:Connect(function()
+            if logoDragged then
+                -- если был drag — игнорируем клик (и сбрасываем флаг)
+                logoDragged = false
+                return
+            end
+            toggleMenuVisible()
         end)
     end
 
@@ -414,17 +444,30 @@ end
 -- Создаем меню при старте
 createMenu()
 
--- Быстрое скрытие/показ клавишей M
+-- Быстрое скрытие/показ клавишей M (теперь сворачивание, а не отключение GUI)
 local visible = true
 UIS.InputBegan:Connect(function(input, gp)
     if gp then return end
     if input.KeyCode == Enum.KeyCode.M then
+        -- т.к. мы не храним ссылку на mainFrame здесь, найдём GUI и имитируем нажатие мини-кнопки:
         local gui = PlayerGui:FindFirstChild("WeHubESPMenu")
         if gui then
-            visible = not visible
-            gui.Enabled = visible
-            if not visible then
-                clearAllHighlights()
+            local main = gui:FindFirstChild("Main")
+            if main then
+                local content = main:FindFirstChild("Content")
+                if content then
+                    -- просто переключаем видимость контента и размер
+                    local currentMin = (main.Size.Y.Offset <= 48)
+                    if currentMin then
+                        -- разворачиваем
+                        main.Size = UDim2.new(0, main.Size.X.Offset, 0, 260)
+                        content.Visible = true
+                    else
+                        -- сворачиваем
+                        content.Visible = false
+                        main.Size = UDim2.new(0, main.Size.X.Offset, 0, 48)
+                    end
+                end
             end
         end
     end
