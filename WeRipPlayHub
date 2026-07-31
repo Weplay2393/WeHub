@@ -2,41 +2,21 @@
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local CollectionService = game:GetService("CollectionService")
-local UIS = game:GetService("UserInputService")
-local VirtualUser = game:GetService("VirtualUser")
-local RunService = game:GetService("RunService")
-
--- Этот скрипт предназначен для запуска на клиенте (LocalScript).
-if not RunService:IsClient() then
-    warn("WeRipPlayHub: этот скрипт должен быть LocalScript и запускаться в клиентской среде (StarterPlayerScripts или PlayerGui). Прекращаю выполнение.")
-    return
-end
-
 local LocalPlayer = Players.LocalPlayer
-if not LocalPlayer then
-    -- В редких случаях в Studio LocalPlayer может ещё не быть — ждём PlayerAdded
-    LocalPlayer = Players.PlayerAdded:Wait()
-end
-local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local PlayerGui = LocalPlayer and LocalPlayer:WaitForChild("PlayerGui") or nil
 
 -- Настройки по умолчанию
 local espPlayersEnabled = true
 local espBoxesEnabled = true
-local autoLootEnabled = false
-local antiAFKEnabled = false
 
 -- Цвета
 local TEAM_COLOR = Color3.fromRGB(0, 255, 0)    -- зеленый для тиммейтов
 local ENEMY_COLOR = Color3.fromRGB(255, 0, 0)   -- красный для врагов
 local CHEST_COLOR = Color3.fromRGB(0, 162, 255) -- синий для интерактивных сундуков
 
--- Кэши для подсветок, чтобы не пересоздавать их каждый цикл
-local playerHighlights = {}
-local chestHighlights = {}
-
 -- Параметры оптимизации
-local CHEST_SCAN_INTERVAL = 4       -- раз в N секунд сканировать мир на сундуки
-local CHEST_MAX_DISTANCE = 200      -- проверять объекты только в радиусе (studs)
+local CHEST_SCAN_INTERVAL = 4 -- секунды между полными сканами мира для сундуков
+local CHEST_MAX_DISTANCE = 220 -- максимальная дистанция для подсветки сундуков (studs)
 
 -- Вспомогательная функция: создание/обновление Highlight
 local function createHighlight(object, fillColor, outlineColor)
@@ -45,39 +25,34 @@ local function createHighlight(object, fillColor, outlineColor)
     if existing and existing:IsA("Highlight") then
         existing.FillColor = fillColor
         existing.OutlineColor = outlineColor or Color3.fromRGB(255,255,255)
-        return existing
+        return
     end
 
     local highlight = Instance.new("Highlight")
     highlight.Name = "ESPHighlight"
     highlight.FillColor = fillColor
     highlight.OutlineColor = outlineColor or Color3.fromRGB(255,255,255)
-    highlight.FillTransparency = 0.35
+    highlight.FillTransparency = 0.4
     highlight.OutlineTransparency = 0
     highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
     highlight.Parent = object
-    return highlight
 end
 
 -- Удаление всех подсветок (полезно при выключении)
 local function clearAllHighlights()
-    for plr, h in pairs(playerHighlights) do
-        if h and h.Parent then pcall(function() h:Destroy() end) end
+    -- Обход игроков
+    for _, plr in pairs(Players:GetPlayers()) do
+        if plr.Character then
+            local h = plr.Character:FindFirstChild("ESPHighlight")
+            if h and h:IsA("Highlight") then h:Destroy() end
+        end
     end
-    table.clear(playerHighlights)
-
-    for obj, h in pairs(chestHighlights) do
-        if h and h.Parent then pcall(function() h:Destroy() end) end
-    end
-    table.clear(chestHighlights)
-end
-
--- Удаляет подсветку для конкретного объекта
-local function removeChestHighlight(obj)
-    local h = chestHighlights[obj]
-    if h then
-        pcall(function() h:Destroy() end)
-        chestHighlights[obj] = nil
+    -- Обход мира
+    for _, obj in pairs(Workspace:GetDescendants()) do
+        if obj:IsA("Model") or obj:IsA("BasePart") then
+            local h = obj:FindFirstChild("ESPHighlight")
+            if h and h:IsA("Highlight") then h:Destroy() end
+        end
     end
 end
 
@@ -86,20 +61,22 @@ local function isTeammate(targetPlayer)
     if not targetPlayer or targetPlayer == LocalPlayer then return false end
 
     -- 1) Стандартные Teams
-    if targetPlayer.Team and LocalPlayer.Team then
+    if targetPlayer.Team and LocalPlayer and LocalPlayer.Team then
         if targetPlayer.Team == LocalPlayer.Team then return true end
     end
 
     -- 2) Кастомные роли (Role / Status)
-    local myRole = LocalPlayer:FindFirstChild("Role") or LocalPlayer:FindFirstChild("Status")
+    local myRole = LocalPlayer and (LocalPlayer:FindFirstChild("Role") or LocalPlayer:FindFirstChild("Status"))
     local targetRole = targetPlayer:FindFirstChild("Role") or targetPlayer:FindFirstChild("Status")
     if myRole and targetRole and myRole.Value == targetRole.Value then
         return true
     end
 
     -- 3) Атрибуты
-    if LocalPlayer.GetAttribute and targetPlayer.GetAttribute and LocalPlayer:GetAttribute("Role") and targetPlayer:GetAttribute("Role") then
-        return LocalPlayer:GetAttribute("Role") == targetPlayer:GetAttribute("Role")
+    if LocalPlayer and LocalPlayer.GetAttribute and targetPlayer.GetAttribute then
+        if LocalPlayer:GetAttribute("Role") and targetPlayer:GetAttribute("Role") then
+            return LocalPlayer:GetAttribute("Role") == targetPlayer:GetAttribute("Role")
+        end
     end
 
     return false
@@ -126,62 +103,15 @@ local function isInteractable(obj)
     -- 4) Наличие child с именем "Interaction" или "Interact"
     if obj:FindFirstChild("Interaction") or obj:FindFirstChild("Interact") then return true end
 
-    -- 5) Тэг через CollectionService: "Interactable"
+    -- 5) Тэг через CollectionService: "Interactable" (если разработчик пометил)
     if CollectionService:HasTag(obj, "Interactable") then return true end
 
     return false
 end
 
--- PLAYER ESP: событийная обработка и кэш подсветок
-local function ensurePlayerHighlight(player)
-    if not player or player == LocalPlayer then return end
-    local char = player.Character
-    if not char or not char:IsDescendantOf(game) then
-        if playerHighlights[player] then
-            pcall(function() playerHighlights[player]:Destroy() end)
-            playerHighlights[player] = nil
-        end
-        return
-    end
-
-    -- Обновляем цвет если подсветка есть
-    if playerHighlights[player] and playerHighlights[player]:IsA("Highlight") then
-        local color = isTeammate(player) and TEAM_COLOR or ENEMY_COLOR
-        playerHighlights[player].FillColor = color
-        playerHighlights[player].OutlineColor = Color3.fromRGB(255,255,255)
-        return
-    end
-
-    -- Создаём и кэшируем
-    local color = isTeammate(player) and TEAM_COLOR or ENEMY_COLOR
-    local h = createHighlight(char, color, Color3.fromRGB(255,255,255))
-    playerHighlights[player] = h
-end
-
--- Подключаем обработчики для игроков
-Players.PlayerAdded:Connect(function(player)
-    player.CharacterAdded:Connect(function(char)
-        task.wait(0.05)
-        if espPlayersEnabled then ensurePlayerHighlight(player) end
-    end)
-    player.CharacterRemoving:Connect(function()
-        if playerHighlights[player] then pcall(function() playerHighlights[player]:Destroy() end); playerHighlights[player]=nil end
-    end)
-end)
-
-for _, p in pairs(Players:GetPlayers()) do
-    if p.Character then
-        p.CharacterAdded:Connect(function() if espPlayersEnabled then ensurePlayerHighlight(p) end end)
-        p.CharacterRemoving:Connect(function() if playerHighlights[p] then pcall(function() playerHighlights[p]:Destroy() end); playerHighlights[p]=nil end end)
-        if espPlayersEnabled then ensurePlayerHighlight(p) end
-    else
-        p.CharacterAdded:Connect(function() if espPlayersEnabled then ensurePlayerHighlight(p) end end)
-    end
-end
-
--- CHEST ESP: ограниченный скан, кэш и дистанция
+-- Вспомогательная: проверка дистанции до игрока (для оптимизации сканов сундуков)
 local function isObjectClose(obj)
-    if not LocalPlayer.Character then return false end
+    if not LocalPlayer or not LocalPlayer.Character then return false end
     local hrp = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
     if not hrp then return false end
     local pos
@@ -195,80 +125,384 @@ local function isObjectClose(obj)
     return (pos - hrp.Position).Magnitude <= CHEST_MAX_DISTANCE
 end
 
-local chestNamePatterns = { "chest", "box", "crate", "loot", "container" }
-local function nameLooksLikeChest(name)
-    if not name then return false end
-    local lname = tostring(name):lower()
-    for _, pat in ipairs(chestNamePatterns) do
-        if lname:match(pat) then return true end
+-- Обновление ESP игроков
+local function updatePlayersESP()
+    if not espPlayersEnabled then
+        -- при выключенном ESP игроков — удаляем их подсветки
+        for _, plr in pairs(Players:GetPlayers()) do
+            if plr.Character then
+                local h = plr.Character:FindFirstChild("ESPHighlight")
+                if h and h:IsA("Highlight") then h:Destroy() end
+            end
+        end
+        return
     end
-    return false
-end
 
-local function scanForChests()
-    local tagged = CollectionService:GetTagged("Interactable")
-    for _, obj in ipairs(tagged) do
-        if obj and obj.Parent and isInteractable(obj) and isObjectClose(obj) then
-            if not chestHighlights[obj] then chestHighlights[obj] = createHighlight(obj, CHEST_COLOR, Color3.fromRGB(255,255,255)) end
-        else
-            removeChestHighlight(obj)
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+            local color = isTeammate(player) and TEAM_COLOR or ENEMY_COLOR
+            createHighlight(player.Character, color, Color3.fromRGB(255,255,255))
         end
     end
+end
 
-    for _, obj in ipairs(Workspace:GetDescendants()) do
-        if (obj:IsA("Model") or obj:IsA("BasePart")) and nameLooksLikeChest(obj.Name) then
+-- Обновление ESP сундуков/коробок (только интерактивных) с оптимизацией
+local function updateChestsESP()
+    if not espBoxesEnabled then
+        -- удалить все подсветки сундуков
+        for _, obj in pairs(Workspace:GetDescendants()) do
+            if (obj:IsA("Model") or obj:IsA("BasePart")) and obj:FindFirstChild("ESPHighlight") then
+                local h = obj:FindFirstChild("ESPHighlight")
+                if h and h:IsA("Highlight") then h:Destroy() end
+            end
+        end
+        return
+    end
+
+    -- Сканируем сначала объекты с тэгом Interactable (быстро)
+    local tagged = CollectionService:GetTagged("Interactable")
+    for _, obj in ipairs(tagged) do
+        if obj and (obj:IsA("Model") or obj:IsA("BasePart")) then
             if isInteractable(obj) and isObjectClose(obj) then
-                if not chestHighlights[obj] then chestHighlights[obj] = createHighlight(obj, CHEST_COLOR, Color3.fromRGB(255,255,255)) end
+                createHighlight(obj, CHEST_COLOR, Color3.fromRGB(255,255,255))
             else
-                removeChestHighlight(obj)
+                local h = obj:FindFirstChild("ESPHighlight")
+                if h and h:IsA("Highlight") then h:Destroy() end
             end
         end
     end
 
-    for obj, h in pairs(chestHighlights) do
-        if not obj or not obj.Parent then
-            pcall(function() h:Destroy() end)
-            chestHighlights[obj] = nil
+    -- Затем ограниченный обход мира: только объекты с подходящими именами и в пределах дистанции
+    for _, obj in ipairs(Workspace:GetDescendants()) do
+        if (obj:IsA("Model") or obj:IsA("BasePart")) then
+            local name = tostring(obj.Name):lower()
+            if name:match("chest") or name:match("box") or name:match("crate") or name:match("loot") or name:match("container") then
+                if isInteractable(obj) and isObjectClose(obj) then
+                    createHighlight(obj, CHEST_COLOR, Color3.fromRGB(255,255,255))
+                else
+                    local h = obj:FindFirstChild("ESPHighlight")
+                    if h and h:IsA("Highlight") then h:Destroy() end
+                end
+            end
         end
     end
 end
 
--- Фоновый цикл для скана сундуков с интервалом
+-- Раздельные фоновые циклы: игроки — чаще, сундуки — реже, чтобы уменьшить лаги при включении
 task.spawn(function()
     while true do
-        if espBoxesEnabled then
-            pcall(scanForChests)
-        else
-            for obj, h in pairs(chestHighlights) do pcall(function() h:Destroy() end); chestHighlights[obj]=nil end
-        end
+        pcall(updatePlayersESP)
+        task.wait(1.5)
+    end
+end)
+
+task.spawn(function()
+    while true do
+        pcall(updateChestsESP)
         task.wait(CHEST_SCAN_INTERVAL)
     end
 end)
 
--- Редкий цикл обновления игроковых подсветок
-task.spawn(function()
-    while true do
-        if espPlayersEnabled then
-            for _, player in pairs(Players:GetPlayers()) do
-                if player ~= LocalPlayer then
-                    ensurePlayerHighlight(player)
+-- ============================
+-- GUI: Красно-чёрное меню (восстановлено исходное поведение)
+-- ============================
+local function createMenu()
+    -- Удаляем старое меню, если есть
+    if not PlayerGui then
+        PlayerGui = Players.LocalPlayer and Players.LocalPlayer:FindFirstChild("PlayerGui")
+        if not PlayerGui then return end
+    end
+
+    local existingGui = PlayerGui:FindFirstChild("WeHubESPMenu")
+    if existingGui then existingGui:Destroy() end
+
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "WeHubESPMenu"
+    screenGui.ResetOnSpawn = false
+    screenGui.Parent = PlayerGui
+
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Name = "Main"
+    mainFrame.Size = UDim2.new(0, 380, 0, 220)
+    mainFrame.Position = UDim2.new(0.6, 0, 0.15, 0)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Parent = screenGui
+
+    local uic = Instance.new("UICorner", mainFrame)
+    uic.CornerRadius = UDim.new(0, 8)
+
+    -- Titlebar
+    local titleBar = Instance.new("Frame")
+    titleBar.Name = "TitleBar"
+    titleBar.Size = UDim2.new(1, 0, 0, 30)
+    titleBar.Position = UDim2.new(0, 0, 0, 0)
+    titleBar.BackgroundColor3 = Color3.fromRGB(30, 0, 0)
+    titleBar.BorderSizePixel = 0
+    titleBar.Parent = mainFrame
+
+    local title = Instance.new("TextLabel")
+    title.Name = "Title"
+    title.Size = UDim2.new(1, -90, 1, 0)
+    title.Position = UDim2.new(0, 8, 0, 0)
+    title.BackgroundTransparency = 1
+    title.Text = "WeHub ESP"
+    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Font = Enum.Font.SourceSansBold
+    title.TextSize = 16
+    title.Parent = titleBar
+
+    -- Close / Minimize / Maximize buttons
+    local btnClose = Instance.new("TextButton")
+    btnClose.Name = "Close"
+    btnClose.Size = UDim2.new(0, 26, 0, 20)
+    btnClose.Position = UDim2.new(1, -32, 0, 5)
+    btnClose.BackgroundColor3 = Color3.fromRGB(170, 0, 0)
+    btnClose.Text = "X"
+    btnClose.Font = Enum.Font.SourceSansBold
+    btnClose.TextSize = 14
+    btnClose.TextColor3 = Color3.fromRGB(255,255,255)
+    btnClose.Parent = titleBar
+    Instance.new("UICorner", btnClose).CornerRadius = UDim.new(0,4)
+
+    local btnMin = Instance.new("TextButton")
+    btnMin.Name = "Min"
+    btnMin.Size = UDim2.new(0, 26, 0, 20)
+    btnMin.Position = UDim2.new(1, -64, 0, 5)
+    btnMin.BackgroundColor3 = Color3.fromRGB(100, 0, 0)
+    btnMin.Text = "_"
+    btnMin.Font = Enum.Font.SourceSansBold
+    btnMin.TextSize = 14
+    btnMin.TextColor3 = Color3.fromRGB(255,255,255)
+    btnMin.Parent = titleBar
+    Instance.new("UICorner", btnMin).CornerRadius = UDim.new(0,4)
+
+    local btnMax = Instance.new("TextButton")
+    btnMax.Name = "Max"
+    btnMax.Size = UDim2.new(0, 26, 0, 20)
+    btnMax.Position = UDim2.new(1, -96, 0, 5)
+    btnMax.BackgroundColor3 = Color3.fromRGB(120, 0, 0)
+    btnMax.Text = "▢"
+    btnMax.Font = Enum.Font.SourceSansBold
+    btnMax.TextSize = 12
+    btnMax.TextColor3 = Color3.fromRGB(255,255,255)
+    btnMax.Parent = titleBar
+    Instance.new("UICorner", btnMax).CornerRadius = UDim.new(0,4)
+
+    -- Content area
+    local content = Instance.new("Frame")
+    content.Name = "Content"
+    content.Size = UDim2.new(1, -16, 1, -46)
+    content.Position = UDim2.new(0, 8, 0, 38)
+    content.BackgroundTransparency = 1
+    content.Parent = mainFrame
+
+    -- Player ESP Toggle
+    local playerToggleLabel = Instance.new("TextLabel")
+    playerToggleLabel.Size = UDim2.new(0, 220, 0, 30)
+    playerToggleLabel.Position = UDim2.new(0, 8, 0, 4)
+    playerToggleLabel.Text = "ESP Players (Green = Team, Red = Enemy)"
+    playerToggleLabel.TextColor3 = Color3.fromRGB(255,255,255)
+    playerToggleLabel.BackgroundTransparency = 1
+    playerToggleLabel.Font = Enum.Font.SourceSans
+    playerToggleLabel.TextSize = 14
+    playerToggleLabel.Parent = content
+
+    local playerToggle = Instance.new("TextButton")
+    playerToggle.Size = UDim2.new(0, 80, 0, 26)
+    playerToggle.Position = UDim2.new(1, -92, 0, 4)
+    playerToggle.Text = espPlayersEnabled and "ON" or "OFF"
+    playerToggle.BackgroundColor3 = espPlayersEnabled and Color3.fromRGB(200,30,30) or Color3.fromRGB(80,80,80)
+    playerToggle.TextColor3 = Color3.fromRGB(255,255,255)
+    playerToggle.Font = Enum.Font.SourceSansBold
+    playerToggle.TextSize = 14
+    playerToggle.Parent = content
+    Instance.new("UICorner", playerToggle).CornerRadius = UDim.new(0,6)
+
+    -- Boxes ESP Toggle
+    local boxToggleLabel = Instance.new("TextLabel")
+    boxToggleLabel.Size = UDim2.new(0, 220, 0, 30)
+    boxToggleLabel.Position = UDim2.new(0, 8, 0, 44)
+    boxToggleLabel.Text = "ESP Boxes (Только интерактивные) — Синий"
+    boxToggleLabel.TextColor3 = Color3.fromRGB(255,255,255)
+    boxToggleLabel.BackgroundTransparency = 1
+    boxToggleLabel.Font = Enum.Font.SourceSans
+    boxToggleLabel.TextSize = 14
+    boxToggleLabel.Parent = content
+
+    local boxToggle = Instance.new("TextButton")
+    boxToggle.Size = UDim2.new(0, 80, 0, 26)
+    boxToggle.Position = UDim2.new(1, -92, 0, 44)
+    boxToggle.Text = espBoxesEnabled and "ON" or "OFF"
+    boxToggle.BackgroundColor3 = espBoxesEnabled and Color3.fromRGB(200,30,30) or Color3.fromRGB(80,80,80)
+    boxToggle.TextColor3 = Color3.fromRGB(255,255,255)
+    boxToggle.Font = Enum.Font.SourceSansBold
+    boxToggle.TextSize = 14
+    boxToggle.Parent = content
+    Instance.new("UICorner", boxToggle).CornerRadius = UDim.new(0,6)
+
+    -- Footer / Resize handle
+    local footer = Instance.new("Frame")
+    footer.Size = UDim2.new(1, 0, 0, 10)
+    footer.Position = UDim2.new(0, 0, 1, -10)
+    footer.BackgroundTransparency = 1
+    footer.Parent = mainFrame
+
+    local resizeGrip = Instance.new("ImageLabel")
+    resizeGrip.Size = UDim2.new(0, 14, 0, 14)
+    resizeGrip.Position = UDim2.new(1, -18, 1, -18)
+    resizeGrip.BackgroundTransparency = 1
+    resizeGrip.Image = "rbxassetid://6023426915" -- маленький треугольник
+    resizeGrip.Parent = mainFrame
+
+    -- Логика кнопок
+    local isMinimized = false
+    local isMaximized = false
+    local storedSize = mainFrame.Size
+    local storedPos = mainFrame.Position
+
+    btnClose.MouseButton1Click:Connect(function()
+        screenGui:Destroy()
+        clearAllHighlights()
+    end)
+
+    btnMin.MouseButton1Click:Connect(function()
+        if not isMinimized then
+            storedSize = mainFrame.Size
+            storedPos = mainFrame.Position
+            mainFrame.Size = UDim2.new(0, 220, 0, 30)
+            mainFrame.Position = UDim2.new(mainFrame.Position.X.Scale, mainFrame.Position.X.Offset, mainFrame.Position.Y.Scale, mainFrame.Position.Y.Offset)
+            isMinimized = true
+        else
+            mainFrame.Size = storedSize
+            mainFrame.Position = storedPos
+            isMinimized = false
+        end
+    end)
+
+    btnMax.MouseButton1Click:Connect(function()
+        if not isMaximized then
+            storedSize = mainFrame.Size
+            storedPos = mainFrame.Position
+            mainFrame.Size = UDim2.new(0.9, 0, 0.8, 0)
+            mainFrame.Position = UDim2.new(0.05, 0, 0.1, 0)
+            isMaximized = true
+            isMinimized = false
+        else
+            mainFrame.Size = storedSize
+            mainFrame.Position = storedPos
+            isMaximized = false
+        end
+    end)
+
+    -- Toggle handlers
+    playerToggle.MouseButton1Click:Connect(function()
+        espPlayersEnabled = not espPlayersEnabled
+        playerToggle.Text = espPlayersEnabled and "ON" or "OFF"
+        playerToggle.BackgroundColor3 = espPlayersEnabled and Color3.fromRGB(200,30,30) or Color3.fromRGB(80,80,80)
+        if not espPlayersEnabled then
+            -- удалить подсветки игроков
+            for _, plr in pairs(Players:GetPlayers()) do
+                if plr.Character then
+                    local h = plr.Character:FindFirstChild("ESPHighlight")
+                    if h and h:IsA("Highlight") then h:Destroy() end
                 end
             end
-        else
-            for p, h in pairs(playerHighlights) do pcall(function() h:Destroy() end); playerHighlights[p]=nil end
         end
-        task.wait(2.5)
+    end)
+
+    boxToggle.MouseButton1Click:Connect(function()
+        espBoxesEnabled = not espBoxesEnabled
+        boxToggle.Text = espBoxesEnabled and "ON" or "OFF"
+        boxToggle.BackgroundColor3 = espBoxesEnabled and Color3.fromRGB(200,30,30) or Color3.fromRGB(80,80,80)
+        if not espBoxesEnabled then
+            -- удалить подсветки сундуков
+            for _, obj in pairs(Workspace:GetDescendants()) do
+                if (obj:IsA("Model") or obj:IsA("BasePart")) and obj:FindFirstChild("ESPHighlight") then
+                    local h = obj:FindFirstChild("ESPHighlight")
+                    if h and h:IsA("Highlight") then h:Destroy() end
+                end
+            end
+        end
+    end)
+
+    -- Перетаскивание окна (drag)
+    local dragging = false
+    local dragStart
+    local startPos
+
+    titleBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            dragStart = input.Position
+            startPos = mainFrame.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+
+    titleBar.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement then
+            if dragging and dragStart and startPos then
+                local delta = input.Position - dragStart
+                local newX = startPos.X.Offset + delta.X
+                local newY = startPos.Y.Offset + delta.Y
+                mainFrame.Position = UDim2.new(startPos.X.Scale, newX, startPos.Y.Scale, newY)
+            end
+        end
+    end)
+
+    -- Изменение размера (resize)
+    local resizing = false
+    local resizeStart
+    local startSize
+
+    resizeGrip.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            resizing = true
+            resizeStart = input.Position
+            startSize = mainFrame.Size
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    resizing = false
+                end
+            end)
+        end
+    end)
+
+    resizeGrip.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement then
+            if resizing and resizeStart and startSize then
+                local delta = input.Position - resizeStart
+                local newW = math.clamp(startSize.X.Offset + delta.X, 220, 1000)
+                local newH = math.clamp(startSize.Y.Offset + delta.Y, 36, 800)
+                mainFrame.Size = UDim2.new(0, newW, 0, newH)
+            end
+        end
+    end)
+
+end
+
+-- Создаем меню при старте
+createMenu()
+
+-- Если нужно, можно добавить клавишу для быстрого скрытия/показа (например, клавиша M)
+local UIS = game:GetService("UserInputService")
+local visible = true
+UIS.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == Enum.KeyCode.M then
+        local gui = PlayerGui and PlayerGui:FindFirstChild("WeHubESPMenu")
+        if gui then
+            visible = not visible
+            gui.Enabled = visible
+            if not visible then
+                clearAllHighlights()
+            end
+        end
     end
 end)
-
--- Простая попытка авто-лута (будет пытаться активировать ProximityPrompt/ClickDetector через безопасные pcall вызовы)
-local function attemptInteract(obj)
-    if not obj then return false end
-    for _, prompt in pairs(obj:GetDescendants()) do
-        if prompt:IsA("ProximityPrompt") then
-            pcall(function()
-                if prompt.Trigger then
-                    prompt:Trigger(LocalPlayer)
-                elseif prompt.Fire then
-                    prompt:Fire(LocalPlayer)
-The file truncated in getfile; maybe it's large. But we need to find why script doesn't run: earlier commit added RunService check, which returns early if not client—good. The user says 
