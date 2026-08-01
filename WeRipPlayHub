@@ -6,23 +6,39 @@ local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 local UIS = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
 
 -- Настройки по умолчанию
 local espPlayersEnabled = true
 local espBoxesEnabled = true
+local autoLootEnabled = false
+local fastLootEnabled = false
 
 -- Цвета
 local TEAM_COLOR = Color3.fromRGB(0, 255, 0)    -- зеленый для тиммейтов
 local ENEMY_COLOR = Color3.fromRGB(255, 0, 0)   -- красный для врагов
 local CHEST_COLOR = Color3.fromRGB(0, 162, 255) -- синий для интерактивных сундуков
 
+-- Кэш для оптимизации
+local highlightCache = {}
+local processedObjects = {}
+local lastUpdateTime = 0
+local UPDATE_INTERVAL = 0.5 -- обновление каждые 0.5 секунды вместо 2
+
 -- Вспомогательная функция: создание/обновление Highlight
 local function createHighlight(object, fillColor, outlineColor)
-    if not object then return end
+    if not object or not object.Parent then return end
+    
+    local objectId = object:GetFullName()
     local existing = object:FindFirstChild("ESPHighlight")
+    
     if existing and existing:IsA("Highlight") then
-        existing.FillColor = fillColor
-        existing.OutlineColor = outlineColor or Color3.fromRGB(255,255,255)
+        if highlightCache[objectId] then
+            if highlightCache[objectId].fillColor ~= fillColor then
+                existing.FillColor = fillColor
+                highlightCache[objectId].fillColor = fillColor
+            end
+        end
         return
     end
 
@@ -34,23 +50,18 @@ local function createHighlight(object, fillColor, outlineColor)
     highlight.OutlineTransparency = 0
     highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
     highlight.Parent = object
+    
+    highlightCache[objectId] = {fillColor = fillColor}
 end
 
--- Удаление всех подсветок (полезно при выключении)
+-- Удаление всех подсветок
 local function clearAllHighlights()
-    -- Обход игроков
-    for _, plr in pairs(Players:GetPlayers()) do
-        if plr.Character then
-            local h = plr.Character:FindFirstChild("ESPHighlight")
-            if h and h:IsA("Highlight") then h:Destroy() end
-        end
+    for objectId, _ in pairs(highlightCache) do
+        highlightCache[objectId] = nil
     end
-    -- Обход мира
-    for _, obj in pairs(Workspace:GetDescendants()) do
-        if obj:IsA("Model") or obj:IsA("BasePart") then
-            local h = obj:FindFirstChild("ESPHighlight")
-            if h and h:IsA("Highlight") then h:Destroy() end
-        end
+    
+    for _, h in pairs(Workspace:FindFirstChild("Highlights") and Workspace.Highlights:GetChildren() or {}) do
+        if h:IsA("Highlight") then h:Destroy() end
     end
 end
 
@@ -75,16 +86,11 @@ local function isTeammate(targetPlayer)
     return false
 end
 
--- Определение: можно ли взаимодействовать с объектом ( сундук/коробка )
+-- Определение: можно ли взаимодействовать с объектом
 local function isInteractable(obj)
-    if not obj then return false end
+    if not obj or not obj.Parent then return false end
 
     if obj:FindFirstChildOfClass("ProximityPrompt") then return true end
-    for _, descendant in pairs(obj:GetDescendants()) do
-        if descendant:IsA("ProximityPrompt") then return true end
-        if descendant:IsA("ClickDetector") then return true end
-    end
-
     if obj:FindFirstChildOfClass("ClickDetector") then return true end
     if obj:GetAttribute("CanInteract") == true then return true end
     if obj:FindFirstChild("Interaction") or obj:FindFirstChild("Interact") then return true end
@@ -93,17 +99,9 @@ local function isInteractable(obj)
     return false
 end
 
--- Обновление ESP игроков
+-- Обновление ESP игроков (оптимизированно)
 local function updatePlayersESP()
-    if not espPlayersEnabled then
-        for _, plr in pairs(Players:GetPlayers()) do
-            if plr.Character then
-                local h = plr.Character:FindFirstChild("ESPHighlight")
-                if h and h:IsA("Highlight") then h:Destroy() end
-            end
-        end
-        return
-    end
+    if not espPlayersEnabled then return end
 
     for _, player in pairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
@@ -113,50 +111,101 @@ local function updatePlayersESP()
     end
 end
 
--- Обновление ESP сундуков/коробок (только интерактивных)
+-- Обновление ESP сундуков/коробок (оптимизированно)
 local function updateChestsESP()
-    if not espBoxesEnabled then
-        for _, obj in pairs(Workspace:GetDescendants()) do
-            if (obj:IsA("Model") or obj:IsA("BasePart")) and obj:FindFirstChild("ESPHighlight") then
-                local h = obj:FindFirstChild("ESPHighlight")
-                if h and h:IsA("Highlight") then h:Destroy() end
+    if not espBoxesEnabled then return end
+
+    local chestKeywords = {"chest", "box", "crate", "loot", "container"}
+    
+    for _, obj in pairs(Workspace:GetDescendants()) do
+        if not (obj:IsA("Model") or obj:IsA("BasePart")) then continue end
+        if not obj.Parent then continue end
+        
+        local objectId = obj:GetFullName()
+        if processedObjects[objectId] then continue end
+        
+        local name = tostring(obj.Name):lower()
+        local isChest = false
+        
+        for _, keyword in ipairs(chestKeywords) do
+            if name:match(keyword) then
+                isChest = true
+                break
             end
         end
-        return
+        
+        if isChest or CollectionService:HasTag(obj, "Interactable") then
+            if isInteractable(obj) then
+                createHighlight(obj, CHEST_COLOR, Color3.fromRGB(255,255,255))
+                processedObjects[objectId] = true
+            end
+        end
     end
+end
+
+-- АВТ ЛУТ: автоматическое собирание предметов
+local function autoLoot()
+    if not autoLootEnabled or not LocalPlayer.Character then return end
 
     for _, obj in pairs(Workspace:GetDescendants()) do
-        if obj:IsA("Model") or obj:IsA("BasePart") then
-            local name = tostring(obj.Name):lower()
-            if name:match("chest") or name:match("box") or name:match("crate") or name:match("loot") or name:match("container") then
-                if isInteractable(obj) then
-                    createHighlight(obj, CHEST_COLOR, Color3.fromRGB(255,255,255))
-                else
-                    local h = obj:FindFirstChild("ESPHighlight")
-                    if h and h:IsA("Highlight") then h:Destroy() end
-                end
-            else
-                if CollectionService:HasTag(obj, "Interactable") and isInteractable(obj) then
-                    createHighlight(obj, CHEST_COLOR, Color3.fromRGB(255,255,255))
+        if not (obj:IsA("Model") or obj:IsA("BasePart")) then continue end
+        if not obj.Parent then continue end
+        
+        local name = tostring(obj.Name):lower()
+        if name:match("loot") or name:match("item") or name:match("drop") or name:match("orb") then
+            if obj:IsA("BasePart") then
+                local distance = (obj.Position - LocalPlayer.Character.HumanoidRootPart.Position).Magnitude
+                if distance < 100 then
+                    obj.CanCollide = false
+                    obj.CFrame = LocalPlayer.Character.HumanoidRootPart.CFrame + LocalPlayer.Character.HumanoidRootPart.CFrame.LookVector * 5
                 end
             end
         end
     end
 end
 
--- Фоновый цикл обновления ESP
+-- БЫСТРЫЙ ЛУТ: ускоренное взаимодействие с сундуками
+local function fastLoot()
+    if not fastLootEnabled then return end
+
+    for _, obj in pairs(Workspace:GetDescendants()) do
+        if not (obj:IsA("Model") or obj:IsA("BasePart")) then continue end
+        if not obj.Parent then continue end
+        
+        local name = tostring(obj.Name):lower()
+        if name:match("chest") or name:match("box") or name:match("crate") then
+            if isInteractable(obj) then
+                local prompt = obj:FindFirstChildOfClass("ProximityPrompt")
+                if prompt then
+                    prompt:InputHeld(LocalPlayer:GetMouse())
+                end
+                
+                local detector = obj:FindFirstChildOfClass("ClickDetector")
+                if detector then
+                    detector:FireServer()
+                end
+            end
+        end
+    end
+end
+
+-- Основной фоновый цикл (оптимизированный)
 task.spawn(function()
     while true do
-        pcall(updatePlayersESP)
-        pcall(updateChestsESP)
-        task.wait(2)
+        local currentTime = tick()
+        if (currentTime - lastUpdateTime) >= UPDATE_INTERVAL then
+            pcall(updatePlayersESP)
+            pcall(updateChestsESP)
+            pcall(autoLoot)
+            pcall(fastLoot)
+            lastUpdateTime = currentTime
+        end
+        task.wait(0.1)
     end
 end)
 
 -- ============================
 -- GUI: Улучшенный интерфейс с ползунками и перемещаемым логотипом
--- Поддержка перетаскивания на мобильных устройствах
--- Исправления: надежная перетаскиваемость, безопасная минимизация (не прячет весь GUI)
 -- ============================
 local function createMenu()
     local existingGui = PlayerGui:FindFirstChild("WeHubESPMenu")
@@ -170,7 +219,7 @@ local function createMenu()
     -- Main window
     local mainFrame = Instance.new("Frame")
     mainFrame.Name = "Main"
-    mainFrame.Size = UDim2.new(0, 420, 0, 260)
+    mainFrame.Size = UDim2.new(0, 420, 0, 340)
     mainFrame.Position = UDim2.new(0.55, 0, 0.15, 0)
     mainFrame.BackgroundColor3 = Color3.fromRGB(18,18,18)
     mainFrame.BorderSizePixel = 0
@@ -178,19 +227,18 @@ local function createMenu()
     mainFrame.Parent = screenGui
 
     local originalMainSize = mainFrame.Size
-    local minimizedMainSize = UDim2.new(originalMainSize.X.Scale, originalMainSize.X.Offset, 0, 48) -- высота только титла
+    local minimizedMainSize = UDim2.new(originalMainSize.X.Scale, originalMainSize.X.Offset, 0, 48)
 
     local mainCorner = Instance.new("UICorner")
     mainCorner.CornerRadius = UDim.new(0, 16)
     mainCorner.Parent = mainFrame
 
-    -- Slight border
     local stroke = Instance.new("UIStroke")
     stroke.Thickness = 1
     stroke.Color = Color3.fromRGB(60,0,0)
     stroke.Parent = mainFrame
 
-    -- Titlebar (drag area)
+    -- Titlebar
     local titleBar = Instance.new("Frame")
     titleBar.Name = "TitleBar"
     titleBar.Size = UDim2.new(1, 0, 0, 48)
@@ -198,7 +246,7 @@ local function createMenu()
     titleBar.BackgroundTransparency = 1
     titleBar.Parent = mainFrame
 
-    -- Logo island (перемещаемая красная W на чёрном фоне)
+    -- Logo island
     local logoIsland = Instance.new("Frame")
     logoIsland.Name = "LogoIsland"
     logoIsland.Size = UDim2.new(0, 44, 0, 44)
@@ -225,7 +273,7 @@ local function createMenu()
     title.Size = UDim2.new(1, -80, 0, 40)
     title.Position = UDim2.new(0, 64, 0, 4)
     title.BackgroundTransparency = 1
-    title.Text = "WeHub — ESP"
+    title.Text = "WeHub — ESP Pro"
     title.TextColor3 = Color3.fromRGB(255,220,220)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 18
@@ -238,7 +286,7 @@ local function createMenu()
     btnMin.Size = UDim2.new(0, 32, 0, 32)
     btnMin.Position = UDim2.new(1, -44, 0, 8)
     btnMin.BackgroundTransparency = 1
-    btnMin.Image = "rbxassetid://6023426915" -- simple icon
+    btnMin.Image = "rbxassetid://6023426915"
     btnMin.Parent = titleBar
 
     -- Content area
@@ -258,7 +306,7 @@ local function createMenu()
         label.TextColor3 = Color3.fromRGB(230,230,230)
         label.BackgroundTransparency = 1
         label.Font = Enum.Font.Gotham
-        label.TextSize = 14
+        label.TextSize = 12
         label.TextXAlignment = Enum.TextXAlignment.Left
         label.Parent = parent
 
@@ -279,7 +327,6 @@ local function createMenu()
         local kCorner = Instance.new("UICorner", knob)
         kCorner.CornerRadius = UDim.new(0, 14)
 
-        -- Label for ON/OFF inside switch (small)
         local tiny = Instance.new("TextLabel")
         tiny.Size = UDim2.new(1, -4, 1, 0)
         tiny.Position = UDim2.new(0, 2, 0, 0)
@@ -295,11 +342,15 @@ local function createMenu()
 
     -- Create sliders
     local y = 0
-    local pSwitch, pKnob, pTiny = makeSliderRow(content, y, "ESP Players (Green = Team, Red = Enemy)", espPlayersEnabled)
-    y = y + 44
-    local bSwitch, bKnob, bTiny = makeSliderRow(content, y, "ESP Chests (Blue - Interactables)", espBoxesEnabled)
+    local pSwitch, pKnob, pTiny = makeSliderRow(content, y, "ESP Players", espPlayersEnabled)
+    y = y + 40
+    local bSwitch, bKnob, bTiny = makeSliderRow(content, y, "ESP Chests", espBoxesEnabled)
+    y = y + 40
+    local aSwitch, aKnob, aTiny = makeSliderRow(content, y, "Auto Loot", autoLootEnabled)
+    y = y + 40
+    local fSwitch, fKnob, fTiny = makeSliderRow(content, y, "Fast Loot", fastLootEnabled)
 
-    -- Minimize behaviour: теперь скрываем только контент и меняем размер окна
+    -- Minimize behavior
     local isMin = false
     local function setMinimized(state)
         isMin = state
@@ -316,25 +367,15 @@ local function createMenu()
         setMinimized(not isMin)
     end)
 
-    -- Logo island click toggles menu visibility (теперь тоже минифицирует/разворачивает, а не убирает весь ScreenGui)
-    local function toggleMenuVisible()
-        setMinimized(not isMin)
-        if not isMin then
-            -- восстановление: ничего дополнительно делать
-        else
-            -- при сворачивании мы не чистим подсветки автоматически - это поведение оставлено
-        end
-    end
-
-    -- Создаем overlay-кнопку для логотипа (она нужна чтобы ловить клики/тачи)
+    -- Logo island click
     local logoAct = Instance.new("TextButton")
     logoAct.Size = UDim2.new(1,0,1,0)
     logoAct.BackgroundTransparency = 1
     logoAct.Text = ""
     logoAct.Parent = logoIsland
 
-    -- Toggle handlers with smooth tween (knob slide)
-    local function setupSwitch(switchBack, knob, tiny, getVar, setVar)
+    -- Toggle handlers with smooth tween
+    local function setupSwitch(switchBack, knob, tiny, getVar, setVar, onToggle)
         local on = getVar()
         local function updateUI(state)
             tiny.Text = state and "ON" or "OFF"
@@ -343,7 +384,6 @@ local function createMenu()
             knob.BackgroundColor3 = state and Color3.fromRGB(200,30,30) or Color3.fromRGB(140,140,140)
             tween:Play()
         end
-        -- initialize position
         updateUI(on)
 
         local activator = Instance.new("TextButton")
@@ -355,20 +395,16 @@ local function createMenu()
             on = not on
             setVar(on)
             pcall(function() updateUI(on) end)
-            if switchBack == pSwitch then
-                espPlayersEnabled = on
-                if not on then clearAllHighlights() end
-            elseif switchBack == bSwitch then
-                espBoxesEnabled = on
-                if not on then clearAllHighlights() end
-            end
+            if onToggle then onToggle(on) end
         end)
     end
 
     setupSwitch(pSwitch, pKnob, pTiny, function() return espPlayersEnabled end, function(v) espPlayersEnabled = v end)
     setupSwitch(bSwitch, bKnob, bTiny, function() return espBoxesEnabled end, function(v) espBoxesEnabled = v end)
+    setupSwitch(aSwitch, aKnob, aTiny, function() return autoLootEnabled end, function(v) autoLootEnabled = v end)
+    setupSwitch(fSwitch, fKnob, fTiny, function() return fastLootEnabled end, function(v) fastLootEnabled = v end)
 
-    -- Dragging support for mainFrame (через TitleBar, надёжнее)
+    -- Dragging support for mainFrame
     do
         local dragging = false
         local dragInput, dragStart, startPos
@@ -398,7 +434,7 @@ local function createMenu()
         end)
     end
 
-    -- Dragging for logo island (реализовано через logoAct, клик игнорируется если был drag)
+    -- Dragging for logo island
     do
         local dragging = false
         local dragStart, startPos
@@ -421,7 +457,6 @@ local function createMenu()
         logoAct.InputChanged:Connect(function(input)
             if (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) and dragging and dragStart and startPos then
                 local delta = input.Position - dragStart
-                -- порог чтобы отличать клик от драгa
                 if math.abs(delta.X) > 4 or math.abs(delta.Y) > 4 then
                     logoDragged = true
                 end
@@ -431,39 +466,31 @@ local function createMenu()
 
         logoAct.MouseButton1Click:Connect(function()
             if logoDragged then
-                -- если был drag — игнорируем клик (и сбрасываем флаг)
                 logoDragged = false
                 return
             end
-            toggleMenuVisible()
+            setMinimized(not isMin)
         end)
     end
-
 end
 
--- Создаем меню при старте
 createMenu()
 
--- Быстрое скрытие/показ клавишей M (теперь сворачивание, а не отключение GUI)
-local visible = true
+-- Быстрое скрытие/показ клавишей M
 UIS.InputBegan:Connect(function(input, gp)
     if gp then return end
     if input.KeyCode == Enum.KeyCode.M then
-        -- т.к. мы не храним ссылку на mainFrame здесь, найдём GUI и имитируем нажатие мини-кнопки:
         local gui = PlayerGui:FindFirstChild("WeHubESPMenu")
         if gui then
             local main = gui:FindFirstChild("Main")
             if main then
                 local content = main:FindFirstChild("Content")
                 if content then
-                    -- просто переключаем видимость контента и размер
                     local currentMin = (main.Size.Y.Offset <= 48)
                     if currentMin then
-                        -- разворачиваем
-                        main.Size = UDim2.new(0, main.Size.X.Offset, 0, 260)
+                        main.Size = UDim2.new(0, main.Size.X.Offset, 0, 340)
                         content.Visible = true
                     else
-                        -- сворачиваем
                         content.Visible = false
                         main.Size = UDim2.new(0, main.Size.X.Offset, 0, 48)
                     end
